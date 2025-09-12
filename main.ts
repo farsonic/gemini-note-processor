@@ -55,7 +55,7 @@ const DEFAULT_TRIGGER_ACTIONS: TriggerAction[] = [
     { keyword: 'Organize', action: 'organize', requiresList: false, enabled: true } // US spelling
 ];
 
-const DEFAULT_GEMINI_PROMPT = `You are an expert note-processing assistant integrated into Obsidian. 
+const DEFAULT_GEMINI_PROMPT = `You are an expert note-processing assistant integrated into Obsidian. I am providing you with an image of a handwritten note. 
 Perform the following tasks and format your response *exactly* as specified below, using Markdown. 
 Do not include any other text, headers, or pleasantries in your response.
 
@@ -70,9 +70,6 @@ IMPORTANT: When transcribing, preserve formatting indicators:
 ### Summary
 [Provide a concise bullet-point summary of the key points.]
 
-### Next Actions
-[Identify any clear, actionable next steps mentioned in the note. If none, write "None identified."]
-
 ### Tasks
 [Extract any actionable tasks or to-do items from the note. Format each as a checkbox item using "- [ ]" followed by the task description. 
 Include any time indicators mentioned with the task:
@@ -85,7 +82,6 @@ If no tasks are found, write "None identified."]
 
 ### Detected Tags
 [Identify any hashtags (e.g., #idea, #meeting) in the text. List them here as a comma-separated list, without the '#' symbol. For example: idea, meeting, project-alpha. If none are found, write "None identified."]`;
-
 
 interface GeminiNoteProcessorSettings {
     geminiApiKey: string;
@@ -170,7 +166,10 @@ export default class GeminiNoteProcessor extends Plugin {
     onunload() { }
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        const loadedData = await this.loadData();
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
+        
+        // Ensure all required settings exist
         if (!this.settings.triggerActions) {
             this.settings.triggerActions = DEFAULT_TRIGGER_ACTIONS;
         }
@@ -192,8 +191,11 @@ export default class GeminiNoteProcessor extends Plugin {
         if (!this.settings.defaultTaskTags) {
             this.settings.defaultTaskTags = '#captured';
         }
-        if (!this.settings.geminiPrompt) {
+        // Ensure geminiPrompt is always set
+        if (!this.settings.geminiPrompt || this.settings.geminiPrompt.trim() === '') {
+            console.log('Initializing Gemini prompt to default');
             this.settings.geminiPrompt = DEFAULT_GEMINI_PROMPT;
+            await this.saveSettings(); // Save it immediately
         }
     }
 
@@ -436,16 +438,7 @@ export default class GeminiNoteProcessor extends Plugin {
 
 			if (this.settings.enableTriggerWords) {
 				resultText = await this.processTriggersInText(resultText);
-			} else if (this.settings.enableTasksIntegration) {
-                const tasksSection = this.parseSection(resultText, "Tasks");
-                if (tasksSection) {
-                    const tasksAdded = await this.addTasksToTasksNote(tasksSection);
-                    if (tasksAdded > 0) {
-                        new Notice(`Added ${tasksAdded} tasks to your Tasks inbox.`);
-                        resultText = resultText.replace(/### Tasks\s*\n.*/s, `### Tasks\n✅ ${tasksAdded} tasks added to [[${this.settings.tasksNotePath.replace('.md', '')}]]`);
-                    }
-                }
-            }
+			}
 			
 			let locationTag: string | null = null;
 			if (this.settings.enableLocationTagging) {
@@ -472,6 +465,7 @@ export default class GeminiNoteProcessor extends Plugin {
 	}
 
     async captureFromAndroidCamera(): Promise<ArrayBuffer | null> {
+        // Check if this is the first camera attempt to show mode selection
         if (this.settings.androidCameraMode === 'ask') {
             const choice = await this.showAndroidCameraModeModal();
             if (!choice) return null;
@@ -479,6 +473,7 @@ export default class GeminiNoteProcessor extends Plugin {
             await this.saveSettings();
         }
         
+        // If gallery mode is selected, return null to trigger file picker
         if (this.settings.androidCameraMode === 'gallery') {
             return null;
         }
@@ -595,6 +590,7 @@ export default class GeminiNoteProcessor extends Plugin {
                 }
                 errorDiv.innerHTML = errorMessage;
                 
+                // Add event listener for the switch to gallery button if it exists
                 setTimeout(() => {
                     const switchBtn = modal.contentEl.querySelector('#switch-to-gallery');
                     if (switchBtn) {
@@ -602,7 +598,7 @@ export default class GeminiNoteProcessor extends Plugin {
                             this.settings.androidCameraMode = 'gallery';
                             await this.saveSettings();
                             modal.close();
-                            resolve(null);
+                            resolve(null); // Trigger gallery fallback
                         });
                     }
                 }, 0);
@@ -626,7 +622,7 @@ export default class GeminiNoteProcessor extends Plugin {
             galleryBtn.onclick = () => {
                 stream?.getTracks().forEach(track => track.stop());
                 modal.close();
-                resolve(null);
+                resolve(null); // This will trigger the file picker fallback
             };
             
             cancelBtn.onclick = () => {
@@ -643,7 +639,6 @@ export default class GeminiNoteProcessor extends Plugin {
         });
     }
 
-    // RESTORED missing helper function
     async showAndroidCameraModeModal(): Promise<'camera' | 'gallery' | null> {
         return new Promise((resolve) => {
             const modal = new Modal(this.app);
@@ -708,22 +703,27 @@ export default class GeminiNoteProcessor extends Plugin {
         let sourceFileName = 'captured-image.jpg';
 
         if (isAndroid && this.settings.androidCameraMode !== 'gallery') {
+            // Try camera first on Android
             imageData = await this.captureFromAndroidCamera();
             
+            // If camera failed and mode is 'camera', show helpful message and fall back to gallery
             if (!imageData && this.settings.androidCameraMode === 'camera') {
                 new Notice("Camera access failed. Falling back to gallery...");
             }
         }
 
+        // Fall back to file picker if camera didn't work or if gallery mode is selected
         if (!imageData) {
             const file = await new Promise<File | null>((resolve) => {
                 const input = document.createElement('input');
                 input.type = 'file';
                 input.accept = 'image/*';
                 
+                // On iOS, still try to use camera capture
                 if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) {
                     input.capture = 'environment';
                 }
+                // On Android with camera mode, try to trigger camera through file picker
                 else if (isAndroid && this.settings.androidCameraMode === 'camera') {
                     input.capture = 'environment';
                 }
@@ -777,15 +777,6 @@ export default class GeminiNoteProcessor extends Plugin {
 
             if (this.settings.enableTriggerWords) {
                 resultText = await this.processTriggersInText(resultText);
-            } else if (this.settings.enableTasksIntegration) {
-                const tasksSection = this.parseSection(resultText, "Tasks");
-                if (tasksSection) {
-                    const tasksAdded = await this.addTasksToTasksNote(tasksSection);
-                    if (tasksAdded > 0) {
-                        new Notice(`Added ${tasksAdded} tasks to your Tasks inbox.`);
-                        resultText = resultText.replace(/### Tasks\s*[\s\S]*/s, `### Tasks\n✅ ${tasksAdded} tasks added to [[${this.settings.tasksNotePath.replace('.md', '')}]]`);
-                    }
-                }
             }
             
             const detectedTags = this.parseDetectedTags(resultText);
@@ -828,64 +819,108 @@ export default class GeminiNoteProcessor extends Plugin {
 
     async processTriggersInText(text: string): Promise<string> {
         const triggers = this.detectTriggerWords(text);
+        let processedTasks = false;
         
-        const tasksTrigger = triggers.find(t => t.action.action === 'tasks');
+        console.log(`Found ${triggers.length} triggers in text`);
+        
+        // Check if we have a Tasks trigger
+        const tasksTrigger = triggers.find(t => t.action.keyword === 'Tasks');
         if (tasksTrigger && this.settings.enableTasksIntegration) {
+            console.log('Tasks trigger found with content:', tasksTrigger.content);
             const tasksAdded = await this.addTasksToTasksNote(tasksTrigger.content);
             if (tasksAdded > 0) {
-                new Notice(`Added ${tasksAdded} tasks to your Tasks inbox.`);
+                processedTasks = true;
+                new Notice(`Added ${tasksAdded} tasks to ${this.settings.tasksNotePath}`);
+            } else {
+                console.log('No tasks were added (returned 0)');
             }
         }
         
-        const otherTriggers = triggers.filter(t => t.action.action !== 'tasks');
-        if (otherTriggers.length === 0) {
-            if(tasksTrigger) {
-                return text.replace(/### Tasks\s*[\s\S]*/s, `### Tasks\n✅ Tasks have been added to your inbox.`);
-            }
-            return text;
-        }
+        if (triggers.length === 0) return text;
 
         const triggerResponses: string[] = [];
-        for (const trigger of otherTriggers) {
+        for (const trigger of triggers) {
+            // Skip Tasks trigger if we already processed it for Obsidian Tasks
+            if (trigger.action.keyword === 'Tasks' && processedTasks) {
+                triggerResponses.push(`### Tasks\n✅ ${trigger.content.split('\n').filter(t => t.trim()).length} tasks added to [[${this.settings.tasksNotePath.replace('.md', '')}]]`);
+                continue;
+            }
+            
             new Notice(`Processing trigger: ${trigger.trigger}...`);
             const response = await this.processTriggerWithGemini(trigger);
             if (response) triggerResponses.push(response);
         }
         
         if (triggerResponses.length > 0) {
-            let processedText = text;
-            if(tasksTrigger) {
-                processedText = processedText.replace(/### Tasks\s*[\s\S]*/s, `### Tasks\n✅ Tasks have been added to your inbox.`);
-            }
-            return `${processedText}\n\n---\n## Triggered Actions\n\n${triggerResponses.join('\n\n')}`;
+            return `${text}\n\n---\n## Triggered Actions\n\n${triggerResponses.join('\n\n')}`;
         }
         return text;
     }
 
     async addTasksToTasksNote(tasksContent: string): Promise<number> {
         try {
+            // Parse the tasks from the content
             const tasks = this.parseTasksForObsidianTasks(tasksContent);
-            if (tasks.length === 0) return 0;
-            
-            let tasksFile = this.app.vault.getAbstractFileByPath(this.settings.tasksNotePath);
-            if (!tasksFile) {
-                const folderPath = this.settings.tasksNotePath.substring(0, this.settings.tasksNotePath.lastIndexOf('/'));
-                if (folderPath && !(await this.app.vault.adapter.exists(folderPath))) {
-                    await this.app.vault.createFolder(folderPath);
-                }
-                tasksFile = await this.app.vault.create(this.settings.tasksNotePath, `# Tasks\n\n${this.settings.tasksSectionHeading}\n`);
+            if (tasks.length === 0) {
+                console.log('No tasks parsed from content');
+                return 0;
             }
             
-            if (!(tasksFile instanceof TFile)) return 0;
+            console.log(`Parsed ${tasks.length} tasks:`, tasks);
             
+            // Ensure the tasks note exists
+            let tasksFile = this.app.vault.getAbstractFileByPath(this.settings.tasksNotePath);
+            if (!tasksFile) {
+                console.log(`Tasks file not found at ${this.settings.tasksNotePath}, creating...`);
+                // Create the tasks file if it doesn't exist
+                const folderPath = this.settings.tasksNotePath.substring(0, this.settings.tasksNotePath.lastIndexOf('/'));
+                if (folderPath && !(await this.app.vault.adapter.exists(folderPath))) {
+                    console.log(`Creating folder: ${folderPath}`);
+                    await this.app.vault.createFolder(folderPath);
+                }
+                const initialContent = `# Tasks\n\n${this.settings.tasksSectionHeading}\n`;
+                console.log(`Creating tasks file with initial content`);
+                tasksFile = await this.app.vault.create(this.settings.tasksNotePath, initialContent);
+            }
+            
+            if (!(tasksFile instanceof TFile)) {
+                console.error('Tasks file is not a TFile instance');
+                return 0;
+            }
+            
+            // Read current content
+            let content = await this.app.vault.read(tasksFile);
+            console.log('Current tasks file content length:', content.length);
+            
+            // Find or create the section for captured tasks
+            const sectionRegex = new RegExp(`^${this.settings.tasksSectionHeading}`, 'gm');
+            const sectionMatch = content.match(sectionRegex);
+            
+            // Format tasks with Obsidian Tasks syntax
             const formattedTasks = tasks.map(task => this.formatTaskForObsidianTasks(task)).join('\n');
-            const tasksBlock = `\n### Captured from Note on ${window.moment().format('YYYY-MM-DD')}\n${formattedTasks}\n`;
+            const dateStamp = window.moment().format('YYYY-MM-DD HH:mm');
+            const tasksBlock = `\n### Captured ${dateStamp}\n\n${formattedTasks}\n`;
             
-            await this.app.vault.append(tasksFile, tasksBlock);
+            console.log('Tasks block to add:', tasksBlock);
+            
+            if (sectionMatch) {
+                // Insert after the section heading
+                const insertIndex = content.indexOf(sectionMatch[0]) + sectionMatch[0].length;
+                content = content.slice(0, insertIndex) + tasksBlock + content.slice(insertIndex);
+            } else {
+                // Add the section at the end
+                content += `\n\n${this.settings.tasksSectionHeading}${tasksBlock}`;
+            }
+            
+            // Write back to file
+            console.log('Writing updated content to tasks file...');
+            await this.app.vault.modify(tasksFile, content);
+            console.log(`Successfully added ${tasks.length} tasks to ${this.settings.tasksNotePath}`);
             
             return tasks.length;
         } catch (error) {
             console.error('Error adding tasks to tasks note:', error);
+            new Notice(`Error adding tasks: ${error.message}`);
             return 0;
         }
     }
@@ -894,46 +929,72 @@ export default class GeminiNoteProcessor extends Plugin {
         const tasks: Array<{text: string, priority: string, tags: string[], dates?: {[key: string]: string}}> = [];
         const lines = content.split('\n');
         
+        console.log(`Parsing tasks from ${lines.length} lines of content`);
+        
         for (const line of lines) {
-            let trimmed = line.trim();
+            const trimmed = line.trim();
             if (!trimmed) continue;
-
-            trimmed = trimmed.replace(/^[-*•]\s*\[ \]\s*/, '');
             
+            console.log(`Processing line: "${trimmed}"`);
+            
+            // Detect priority indicators
             let priority = '';
+            let taskText = trimmed;
             let dates: {[key: string]: string} = {};
             
-            if (trimmed.match(/^!!!|^HIGH:/i)) {
-                priority = '⏫';
-                trimmed = trimmed.replace(/^(!!!|HIGH:)/i, '').trim();
-            } else if (trimmed.match(/^!!|^MEDIUM:/i)) {
-                priority = '🔼';
-                trimmed = trimmed.replace(/^(!!|MEDIUM:)/i, '').trim();
-            } else if (trimmed.match(/^!|^LOW:/i)) {
-                priority = '🔽';
-                trimmed = trimmed.replace(/^(!|LOW:)/i, '').trim();
+            // Remove bullet points if present
+            taskText = taskText.replace(/^[-*•]\s*/, '');
+            
+            // Check for priority indicators (!, !!, !!!, HIGH, MEDIUM, LOW)
+            if (taskText.match(/^!!!|^HIGH:/i)) {
+                priority = '⏫'; // Highest priority
+                taskText = taskText.replace(/^(!!!|HIGH:)/i, '').trim();
+            } else if (taskText.match(/^!!|^MEDIUM:/i)) {
+                priority = '🔼'; // High priority  
+                taskText = taskText.replace(/^(!!|MEDIUM:)/i, '').trim();
+            } else if (taskText.match(/^!|^LOW:/i)) {
+                priority = '🔽'; // Medium priority
+                taskText = taskText.replace(/^(!|LOW:)/i, '').trim();
             }
-
-            const dateKeywords = ['DUE', 'SCHEDULED', 'START'];
-            for (const keyword of dateKeywords) {
-                const regex = new RegExp(`\\b${keyword}:\\s*([\\w\\s\\d-]+?)(?=\\s*DUE:|\\s*SCHEDULED:|\\s*START:|$)`, 'i');
-                const match = trimmed.match(regex);
-                if (match) {
-                    const parsedDate = this.parseNaturalDate(match[1].trim());
-                    if (parsedDate) {
-                        dates[keyword.toLowerCase()] = parsedDate;
-                        trimmed = trimmed.replace(match[0], '').trim();
-                    }
+            
+            // Extract date indicators
+            const dueMatch = taskText.match(/\b(?:by|due)\s+(tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next\s+\w+|[\w\s]+?)(?=\s*[-,]|\s*$)/i);
+            if (dueMatch) {
+                const parsedDate = this.parseNaturalDate(dueMatch[1]);
+                if (parsedDate) {
+                    dates['due'] = parsedDate;
+                    taskText = taskText.replace(dueMatch[0], '').trim();
                 }
             }
             
-            const tags: string[] = [];
-            const tagMatches = trimmed.match(/#[\w-]+/g);
-            if (tagMatches) {
-                tags.push(...tagMatches);
-                trimmed = trimmed.replace(/#[\w-]+/g, '').trim();
+            const scheduledMatch = taskText.match(/\b(?:scheduled|on)\s+(tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next\s+\w+|[\w\s]+?)(?=\s*[-,]|\s*$)/i);
+            if (scheduledMatch) {
+                const parsedDate = this.parseNaturalDate(scheduledMatch[1]);
+                if (parsedDate) {
+                    dates['scheduled'] = parsedDate;
+                    taskText = taskText.replace(scheduledMatch[0], '').trim();
+                }
             }
             
+            const startMatch = taskText.match(/\b(?:start|begin|starting)\s+(tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next\s+\w+|[\w\s]+?)(?=\s*[-,]|\s*$)/i);
+            if (startMatch) {
+                const parsedDate = this.parseNaturalDate(startMatch[1]);
+                if (parsedDate) {
+                    dates['start'] = parsedDate;
+                    taskText = taskText.replace(startMatch[0], '').trim();
+                }
+            }
+            
+            // Extract any hashtags from the task
+            const tags: string[] = [];
+            const tagMatches = taskText.match(/#[\w-]+/g);
+            if (tagMatches) {
+                tags.push(...tagMatches);
+                // Remove tags from task text
+                taskText = taskText.replace(/#[\w-]+/g, '').trim();
+            }
+            
+            // Add default tag if configured
             if (this.settings.defaultTaskTags) {
                 const defaultTags = this.settings.defaultTaskTags.split(',').map(t => {
                     const tag = t.trim();
@@ -942,33 +1003,50 @@ export default class GeminiNoteProcessor extends Plugin {
                 tags.push(...defaultTags);
             }
             
-            if (trimmed) {
-                tasks.push({ text: trimmed, priority, tags: [...new Set(tags)], dates });
+            // Clean up any remaining punctuation at the end
+            taskText = taskText.replace(/[,\-]+$/, '').trim();
+            
+            if (taskText) {
+                console.log(`Added task: "${taskText}" with priority: "${priority}" and dates:`, dates);
+                tasks.push({ 
+                    text: taskText, 
+                    priority, 
+                    tags: [...new Set(tags)],
+                    dates: Object.keys(dates).length > 0 ? dates : undefined
+                });
             }
         }
         
+        console.log(`Parsed ${tasks.length} total tasks`);
         return tasks;
     }
 
     formatTaskForObsidianTasks(task: {text: string, priority: string, tags: string[], dates?: {[key: string]: string}}): string {
         let formatted = '- [ ] ';
         
+        // Add priority if enabled and present
         if (this.settings.taskPriorities && task.priority) {
             formatted += task.priority + ' ';
         }
         
+        // Add task text
         formatted += task.text;
         
+        // Add dates with proper emojis
+        if (task.dates) {
+            if (task.dates['due']) formatted += ` 📅 ${task.dates['due']}`;
+            if (task.dates['scheduled']) formatted += ` ⏳ ${task.dates['scheduled']}`;
+            if (task.dates['start']) formatted += ` 🛫 ${task.dates['start']}`;
+        }
+        
+        // Add creation date (➕ is the correct emoji for created date in Obsidian Tasks)
+        formatted += ` ➕ ${window.moment().format('YYYY-MM-DD')}`;
+        
+        // Add tags
         if (task.tags.length > 0) {
             formatted += ' ' + task.tags.join(' ');
         }
         
-        if(task.dates) {
-            if(task.dates.start) formatted += ` 🛫 ${task.dates.start}`;
-            if(task.dates.scheduled) formatted += ` ⏳ ${task.dates.scheduled}`;
-            if(task.dates.due) formatted += ` 📅 ${task.dates.due}`;
-        }
-
         return formatted;
     }
 
@@ -976,35 +1054,44 @@ export default class GeminiNoteProcessor extends Plugin {
         const today = baseDate || window.moment();
         const normalizedDate = dateString.toLowerCase().trim();
         
+        // Handle relative dates
         if (normalizedDate === 'today' || normalizedDate === 'tonight') return today.format('YYYY-MM-DD');
         if (normalizedDate === 'tomorrow') return today.clone().add(1, 'day').format('YYYY-MM-DD');
         if (normalizedDate === 'yesterday') return today.clone().subtract(1, 'day').format('YYYY-MM-DD');
         
+        // Handle "next" patterns
         const nextMatch = normalizedDate.match(/^next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|month|year)$/);
         if (nextMatch) {
             const unit = nextMatch[1];
-            const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-            if (daysOfWeek.includes(unit)) {
-                const targetDay = daysOfWeek.indexOf(unit);
+            if (['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].includes(unit)) {
+                const targetDay = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].indexOf(unit);
                 let nextDate = today.clone();
+                // Move to next week if we've passed this day already
                 if (nextDate.day() >= targetDay) {
                     nextDate.add(1, 'week');
                 }
                 nextDate.day(targetDay);
                 return nextDate.format('YYYY-MM-DD');
             }
-            return today.clone().add(1, unit as any).format('YYYY-MM-DD');
+            if (unit === 'week') return today.clone().add(1, 'week').format('YYYY-MM-DD');
+            if (unit === 'month') return today.clone().add(1, 'month').format('YYYY-MM-DD');
+            if (unit === 'year') return today.clone().add(1, 'year').format('YYYY-MM-DD');
         }
         
+        // Handle "this" patterns
         const thisMatch = normalizedDate.match(/^this\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend)$/);
         if (thisMatch) {
             const day = thisMatch[1];
-            const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-            if (day === 'weekend') return today.clone().day(6).format('YYYY-MM-DD');
-            const targetDay = daysOfWeek.indexOf(day);
-            return today.clone().day(targetDay).format('YYYY-MM-DD');
+            if (day === 'weekend') {
+                const saturday = today.clone().day(6);
+                return saturday.format('YYYY-MM-DD');
+            }
+            const targetDay = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].indexOf(day);
+            const thisDay = today.clone().day(targetDay);
+            return thisDay.format('YYYY-MM-DD');
         }
         
+        // Handle "in X days/weeks/months"
         const inMatch = normalizedDate.match(/^in\s+(\d+)\s+(days?|weeks?|months?)$/);
         if (inMatch) {
             const amount = parseInt(inMatch[1]);
@@ -1012,6 +1099,7 @@ export default class GeminiNoteProcessor extends Plugin {
             return today.clone().add(amount, unit as any).format('YYYY-MM-DD');
         }
         
+        // Handle "X days/weeks from now"
         const fromNowMatch = normalizedDate.match(/^(\d+)\s+(days?|weeks?|months?)\s+from\s+(now|today)$/);
         if (fromNowMatch) {
             const amount = parseInt(fromNowMatch[1]);
@@ -1019,46 +1107,62 @@ export default class GeminiNoteProcessor extends Plugin {
             return today.clone().add(amount, unit as any).format('YYYY-MM-DD');
         }
         
-        const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+        // Handle specific date patterns like "1st November 2025"
         const ordinalDateMatch = normalizedDate.match(/(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?/);
         if (ordinalDateMatch) {
             const day = parseInt(ordinalDateMatch[1]);
+            const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
             const monthIndex = monthNames.indexOf(ordinalDateMatch[2]);
             const year = ordinalDateMatch[3] ? parseInt(ordinalDateMatch[3]) : today.year();
+            
             const targetDate = today.clone().year(year).month(monthIndex).date(day);
+            // If no year specified and date is in the past, assume next year
             if (!ordinalDateMatch[3] && targetDate.isBefore(today, 'day')) {
                 targetDate.add(1, 'year');
             }
             return targetDate.format('YYYY-MM-DD');
         }
         
+        // Handle month day patterns (e.g., "June 15", "June 15th")
         const monthDayMatch = normalizedDate.match(/(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?/);
         if (monthDayMatch) {
+            const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+            const month = monthDayMatch[1];
             const day = parseInt(monthDayMatch[2]);
             const year = monthDayMatch[3] ? parseInt(monthDayMatch[3]) : today.year();
-            const monthIndex = monthNames.indexOf(monthDayMatch[1]);
+            const monthIndex = monthNames.indexOf(month);
             const targetDate = today.clone().year(year).month(monthIndex).date(day);
+            // If no year specified and date is in the past, assume next year
             if (!monthDayMatch[3] && targetDate.isBefore(today, 'day')) {
                 targetDate.add(1, 'year');
             }
             return targetDate.format('YYYY-MM-DD');
         }
         
-        if (normalizedDate === 'end of week' || normalizedDate === 'eow') return today.clone().endOf('week').format('YYYY-MM-DD');
-        if (normalizedDate === 'end of month' || normalizedDate === 'eom') return today.clone().endOf('month').format('YYYY-MM-DD');
-        if (normalizedDate === 'end of year' || normalizedDate === 'eoy') return today.clone().endOf('year').format('YYYY-MM-DD');
+        // Handle end of time periods
+        if (normalizedDate === 'end of week' || normalizedDate === 'eow') {
+            return today.clone().endOf('week').format('YYYY-MM-DD');
+        }
+        if (normalizedDate === 'end of month' || normalizedDate === 'eom') {
+            return today.clone().endOf('month').format('YYYY-MM-DD');
+        }
+        if (normalizedDate === 'end of year' || normalizedDate === 'eoy') {
+            return today.clone().endOf('year').format('YYYY-MM-DD');
+        }
         
+        // Handle day names (assume this week or next week)
         const dayMatch = normalizedDate.match(/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/);
         if (dayMatch) {
-            const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-            const targetDay = daysOfWeek.indexOf(dayMatch[1]);
+            const targetDay = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].indexOf(dayMatch[1]);
             let targetDate = today.clone().day(targetDay);
+            // If the day has passed this week, move to next week
             if (targetDate.isBefore(today, 'day')) {
                 targetDate.add(1, 'week');
             }
             return targetDate.format('YYYY-MM-DD');
         }
         
+        // Try parsing with moment directly for standard formats
         const parsed = window.moment(dateString, ['YYYY-MM-DD', 'MM/DD/YYYY', 'DD/MM/YYYY', 'MMM DD, YYYY', 'MMMM DD, YYYY'], true);
         if (parsed.isValid()) {
             return parsed.format('YYYY-MM-DD');
@@ -1088,19 +1192,12 @@ export default class GeminiNoteProcessor extends Plugin {
 
     parseDetectedTags(responseText: string | null): string[] {
         if (!responseText) return [];
-        return this.parseSection(responseText, "Detected Tags")?.split(',').map(tag => tag.trim()).filter(tag => tag) || [];
-    }
-    
-    // RESTORED missing helper function
-    parseSection(responseText: string | null, sectionTitle: string): string | null {
-        if (!responseText) return null;
-        const regex = new RegExp(`(?:### |^)${sectionTitle}\\s*\\n(.*?)(?=\\n###|$)`, 'si');
-        const match = responseText.match(regex);
-        if (match && match[1]) {
-            const content = match[1].trim();
-            return content.toLowerCase() !== 'none identified.' ? content : null;
+        const tagRegex = /### Detected Tags\s*\n(.*?)(?:\n###|$)/s;
+        const match = responseText.match(tagRegex);
+        if (match && match[1] && match[1].toLowerCase().trim() !== 'none identified.') {
+            return match[1].split(',').map(tag => tag.trim()).filter(tag => tag);
         }
-        return null;
+        return [];
     }
 
     async updateNoteProperties(imageFile: TFile, noteFile: TFile, detectedTags: string[] = [], locationTag: string | null, notebookId: string | null, pageNumber: number | null) {
@@ -1132,6 +1229,119 @@ export default class GeminiNoteProcessor extends Plugin {
         });
     }
 
+    processExtractedTasks(tasksSection: string): string {
+        if (!tasksSection || tasksSection.toLowerCase().trim() === 'none identified.') {
+            return 'None identified.';
+        }
+        
+        console.log('Processing tasks section:', tasksSection);
+        
+        const lines = tasksSection.split('\n');
+        const processedTasks: string[] = [];
+        const creationDate = window.moment().format('YYYY-MM-DD');
+        
+        // Get default tags if configured
+        let defaultTags = '';
+        if (this.settings.defaultTaskTags) {
+            const tags = this.settings.defaultTaskTags.split(',').map(t => {
+                const tag = t.trim();
+                return tag.startsWith('#') ? tag : '#' + tag;
+            });
+            defaultTags = ' ' + tags.join(' ');
+        }
+        
+        for (const line of lines) {
+            let trimmed = line.trim();
+            if (!trimmed) continue;
+            
+            console.log('Processing task line:', trimmed);
+            
+            // Check if it's already a checkbox item
+            const checkboxMatch = trimmed.match(/^-\s*\[\s*\]\s*(.+)/);
+            let taskText = '';
+            
+            if (checkboxMatch) {
+                taskText = checkboxMatch[1];
+            } else if (trimmed.startsWith('-') || trimmed.startsWith('*')) {
+                // Convert bullet points to tasks
+                taskText = trimmed.replace(/^[-*]\s*/, '').trim();
+            } else if (!trimmed.startsWith('#') && trimmed.length > 0) {
+                // Treat any non-header line as a potential task
+                taskText = trimmed;
+            }
+            
+            if (taskText) {
+                let priority = '';
+                let dates: {[key: string]: string} = {};
+                
+                // Check for priority indicators
+                if (taskText.match(/^!!!|^HIGH:/i)) {
+                    priority = '⏫ ';
+                    taskText = taskText.replace(/^(!!!|HIGH:)/i, '').trim();
+                } else if (taskText.match(/^!!|^MEDIUM:/i)) {
+                    priority = '🔼 ';
+                    taskText = taskText.replace(/^(!!|MEDIUM:)/i, '').trim();
+                } else if (taskText.match(/^!|^LOW:/i)) {
+                    priority = '🔽 ';
+                    taskText = taskText.replace(/^(!|LOW:)/i, '').trim();
+                }
+                
+                // Extract and parse date indicators
+                const dueMatch = taskText.match(/\bDUE:\s*([^,\s]+(?:\s+[^,\s]+)*?)(?=\s*(?:SCHEDULED:|START:|$))/i);
+                if (dueMatch) {
+                    const parsedDate = this.parseNaturalDate(dueMatch[1]);
+                    if (parsedDate) {
+                        dates['due'] = parsedDate;
+                        taskText = taskText.replace(dueMatch[0], '').trim();
+                    }
+                }
+                
+                const scheduledMatch = taskText.match(/\bSCHEDULED:\s*([^,\s]+(?:\s+[^,\s]+)*?)(?=\s*(?:DUE:|START:|$))/i);
+                if (scheduledMatch) {
+                    const parsedDate = this.parseNaturalDate(scheduledMatch[1]);
+                    if (parsedDate) {
+                        dates['scheduled'] = parsedDate;
+                        taskText = taskText.replace(scheduledMatch[0], '').trim();
+                    }
+                }
+                
+                const startMatch = taskText.match(/\bSTART:\s*([^,\s]+(?:\s+[^,\s]+)*?)(?=\s*(?:DUE:|SCHEDULED:|$))/i);
+                if (startMatch) {
+                    const parsedDate = this.parseNaturalDate(startMatch[1]);
+                    if (parsedDate) {
+                        dates['start'] = parsedDate;
+                        taskText = taskText.replace(startMatch[0], '').trim();
+                    }
+                }
+                
+                // Also check for common date phrases in the task text itself  
+                const byMatch = taskText.match(/\bby\s+(tonight|tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next\s+\w+|\d{1,2}(?:st|nd|rd|th)?\s+\w+(?:\s+\d{4})?|[\w\s]+?)(?=\s*$|[,.])/i);
+                if (byMatch && !dates['due']) {
+                    const parsedDate = this.parseNaturalDate(byMatch[1]);
+                    if (parsedDate) {
+                        dates['due'] = parsedDate;
+                        taskText = taskText.replace(byMatch[0], '').trim();
+                    }
+                }
+                
+                // Build the formatted task with Obsidian Tasks syntax
+                let formattedTask = `- [ ] ${priority}${taskText}`;
+                
+                // Add dates with proper emojis
+                if (dates['due']) formattedTask += ` 📅 ${dates['due']}`;
+                if (dates['scheduled']) formattedTask += ` ⏳ ${dates['scheduled']}`;
+                if (dates['start']) formattedTask += ` 🛫 ${dates['start']}`;
+                formattedTask += ` ➕ ${creationDate}`;
+                formattedTask += defaultTags;
+                
+                console.log('Formatted task:', formattedTask);
+                processedTasks.push(formattedTask);
+            }
+        }
+        
+        return processedTasks.join('\n');
+    }
+
     async callGeminiAPI(imageData: ArrayBuffer): Promise<string | null> {
         const apiKey = this.settings.geminiApiKey;
         const model = this.settings.selectedModel;
@@ -1142,9 +1352,9 @@ export default class GeminiNoteProcessor extends Plugin {
 
         if (this.settings.enableDeepResearch) {
             promptText += `
-				### Deep Research
-				[Also, identify any product names, technologies, or key concepts mentioned in the note. For each item, provide a brief, one-sentence description and a relevant URL (like an official website or Wikipedia page) for more information. Format each item as a bullet point. If none are found, write "None identified."]
-			`;
+				
+### Deep Research
+[Also, identify any product names, technologies, or key concepts mentioned in the note. For each item, provide a brief, one-sentence description and a relevant URL (like an official website or Wikipedia page) for more information. Format each item as a bullet point. If none are found, write "None identified."]`;
         }
 
         const requestBody = { "contents": [{ "parts": [ { "text": promptText }, { "inline_data": { "mime_type": "image/jpeg", "data": imageBase64 } } ] }] };
@@ -1153,7 +1363,31 @@ export default class GeminiNoteProcessor extends Plugin {
             const response = await requestUrl({ url: API_URL, method: 'POST', contentType: 'application/json', body: JSON.stringify(requestBody) });
             const geminiResponse = response.json;
             if (geminiResponse.candidates && geminiResponse.candidates[0]?.content?.parts?.[0]?.text) {
-                return geminiResponse.candidates[0].content.parts[0].text;
+                let responseText = geminiResponse.candidates[0].content.parts[0].text;
+                
+                // Process the Tasks section to add Obsidian Tasks formatting
+                const tasksRegex = /### Tasks\s*\n([\s\S]*?)(?=\n###|$)/;
+                const tasksMatch = responseText.match(tasksRegex);
+                if (tasksMatch && tasksMatch[1]) {
+                    console.log('Found Tasks section, processing...');
+                    const processedTasks = this.processExtractedTasks(tasksMatch[1]);
+                    responseText = responseText.replace(tasksMatch[0], `### Tasks\n${processedTasks}`);
+                } else {
+                    // Check if we have the old format (TODOs) and convert it
+                    const todosRegex = /### TODOs?\s*\n([\s\S]*?)(?=\n###|$)/;
+                    const todosMatch = responseText.match(todosRegex);
+                    if (todosMatch && todosMatch[1]) {
+                        console.log('Found old TODOs section, converting to Tasks...');
+                        const processedTasks = this.processExtractedTasks(todosMatch[1]);
+                        responseText = responseText.replace(todosMatch[0], `### Tasks\n${processedTasks}`);
+                        
+                        // Also remove "Next Actions" section if present
+                        const nextActionsRegex = /### Next Actions\s*\n[\s\S]*?(?=\n###|$)/;
+                        responseText = responseText.replace(nextActionsRegex, '');
+                    }
+                }
+                
+                return responseText;
             } else { throw new Error("Unexpected response structure from Gemini API"); }
         } catch (error) {
             console.error("Gemini API call failed:", error);
@@ -1206,7 +1440,7 @@ export default class GeminiNoteProcessor extends Plugin {
 			'expand': `Take this brief note or concept and expand it into detailed, well-structured paragraphs: \n${trigger.content}\n${lengthInstructions[this.settings.researchResponseLength]}`,
 			'summarize': `Create a concise summary of the following content. Include key points and takeaways:\n${trigger.content}`,
 			'actions': `Extract all action items from this content and create a prioritized task list with suggested deadlines:\n${trigger.content}`,
-            'tasks': `Format the following as a task list:\n${trigger.content}`,
+			'tasks': `Format the following as a task list:\n${trigger.content}`,
 			'analyze': `Provide a critical analysis of the following. Include pros/cons, potential risks, and opportunities:\n${trigger.content}`,
 			'define': `Provide clear definitions with examples for these terms:\n${trigger.content}`,
 			'translate': translationLanguage ? `Translate the following content to ${translationLanguage}. Provide only the translation, maintaining the same format and structure as the original:\n${trigger.content}` : `Translate the following content. Target language is specified first, then the content:\n${trigger.content}`,
@@ -1242,15 +1476,23 @@ class GeminiSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		
 		containerEl.createEl('h2', { text: 'Gemini Note Processor Settings' });
 
 		new Setting(containerEl)
-			.setName('Gemini API Key').setDesc('Your Google AI Studio API key for Gemini')
-			.addText(text => text.setPlaceholder('Enter your API key').setValue(this.plugin.settings.geminiApiKey)
-				.onChange(async (value) => { this.plugin.settings.geminiApiKey = value; await this.plugin.saveSettings(); }));
+			.setName('Gemini API Key')
+			.setDesc('Your Google AI Studio API key for Gemini')
+			.addText(text => text
+				.setPlaceholder('Enter your API key')
+				.setValue(this.plugin.settings.geminiApiKey)
+				.onChange(async (value) => { 
+					this.plugin.settings.geminiApiKey = value; 
+					await this.plugin.saveSettings(); 
+				}));
 		
 		new Setting(containerEl)
-			.setName('Gemini Model').setDesc('Select which Gemini model to use for processing')
+			.setName('Gemini Model')
+			.setDesc('Select which Gemini model to use for processing')
 			.addDropdown(dropdown => dropdown
 				.addOption('gemini-2.5-pro', 'Gemini 2.5 Pro (Enhanced reasoning)')
 				.addOption('gemini-2.5-flash', 'Gemini 2.5 Flash (Adaptive & cost efficient)')
@@ -1260,32 +1502,89 @@ class GeminiSettingTab extends PluginSettingTab {
 				.addOption('gemini-1.5-pro', 'Gemini 1.5 Pro (Complex reasoning)')
 				.addOption('gemini-1.5-flash', 'Gemini 1.5 Flash (Fast & versatile)')
 				.setValue(this.plugin.settings.selectedModel)
-				.onChange(async (value) => { this.plugin.settings.selectedModel = value; await this.plugin.saveSettings(); }));
-        
-        containerEl.createEl('h2', { text: 'Gemini System Prompt' });
-        new Setting(containerEl)
-            .setName('Customize Gemini Prompt')
-            .setDesc('Edit the main prompt sent to Gemini for note processing. Use with caution.')
-            .addTextArea(text => {
-                text
-                    .setValue(this.plugin.settings.geminiPrompt)
-                    .onChange(async (value) => {
-                        this.plugin.settings.geminiPrompt = value;
-                        await this.plugin.saveSettings();
-                    });
-                text.inputEl.rows = 15;
-                text.inputEl.style.width = '100%';
-            })
-            .addButton(button => button
-                .setButtonText('Reset to Default')
-                .setTooltip('Reset the prompt to the recommended default value')
-                .onClick(async () => {
-                    if (confirm("Are you sure you want to reset the prompt to its default?")) {
-                        this.plugin.settings.geminiPrompt = DEFAULT_GEMINI_PROMPT;
-                        await this.plugin.saveSettings();
-                        this.display(); // Refresh the settings tab
-                    }
-                }));
+				.onChange(async (value) => { 
+					this.plugin.settings.selectedModel = value; 
+					await this.plugin.saveSettings(); 
+				}));
+
+		// PROMPT CONFIGURATION SECTION - SIMPLIFIED
+		containerEl.createEl('h2', { text: 'Prompt Configuration' });
+		
+		// Simple setting with just the text area
+		new Setting(containerEl)
+			.setName('Gemini Prompt')
+			.setDesc('Edit the prompt that tells Gemini how to process your notes (be careful with changes)')
+			.addTextArea(text => {
+				// Get the current value with inline fallback
+				const fallbackPrompt = `You are an expert note-processing assistant integrated into Obsidian. I am providing you with an image of a handwritten note.`;
+				const currentValue = this.plugin.settings.geminiPrompt || fallbackPrompt;
+				
+				// Set the value
+				text.setValue(currentValue);
+				
+				// Style the text area
+				text.inputEl.style.width = '100%';
+				text.inputEl.style.height = '300px';
+				text.inputEl.style.fontSize = '11px';
+				text.inputEl.style.fontFamily = 'monospace';
+				
+				// Add change handler
+				text.onChange(async (value) => {
+					this.plugin.settings.geminiPrompt = value;
+					await this.plugin.saveSettings();
+				});
+				
+				return text;
+			});
+		
+		// Test button to verify settings work
+		new Setting(containerEl)
+			.setName('Test Prompt Settings')
+			.setDesc('Click to test if prompt settings are working')
+			.addButton(button => button
+				.setButtonText('Test')
+				.onClick(() => {
+					new Notice(`Prompt length: ${this.plugin.settings.geminiPrompt?.length || 0} characters`);
+				}));
+		
+		// Reset button in its own setting
+		new Setting(containerEl)
+			.setName('Reset Prompt')
+			.setDesc('Reset the prompt to the default template')
+			.addButton(button => button
+				.setButtonText('Reset to Default')
+				.onClick(async () => {
+					// Use the full default prompt inline
+					this.plugin.settings.geminiPrompt = `You are an expert note-processing assistant integrated into Obsidian. I am providing you with an image of a handwritten note. 
+Perform the following tasks and format your response *exactly* as specified below, using Markdown. 
+Do not include any other text, headers, or pleasantries in your response.
+
+IMPORTANT: When transcribing, preserve formatting indicators:
+- If a word appears underlined in the handwriting, format it as <u>word</u>
+- Maintain numbered or bulleted lists exactly as they appear
+- Keep the exact structure and organization of the original note
+
+### Transcript
+[Provide a full, verbatim transcript of the text in the image here, preserving all formatting indicators as specified above.]
+
+### Summary
+[Provide a concise bullet-point summary of the key points.]
+
+### Tasks
+[Extract any actionable tasks or to-do items from the note. Format each as a checkbox item using "- [ ]" followed by the task description. 
+Include any time indicators mentioned with the task:
+- If a due date is mentioned (e.g., "by Friday", "due tomorrow", "by tonight", "before June 1"), include it as "DUE: [date]"
+- If a scheduled/planned date is mentioned (e.g., "scheduled for Monday", "on the 15th"), include it as "SCHEDULED: [date]"
+- If a start date is mentioned (e.g., "start next week", "begin in January"), include it as "START: [date]"
+- If priority is indicated (!, !!, !!!), include it at the beginning
+Example format: "- [ ] !!! Task description DUE: tomorrow SCHEDULED: Monday"
+If no tasks are found, write "None identified."]
+
+### Detected Tags
+[Identify any hashtags (e.g., #idea, #meeting) in the text. List them here as a comma-separated list, without the '#' symbol. For example: idea, meeting, project-alpha. If none are found, write "None identified."]`;
+					await this.plugin.saveSettings();
+					this.display();
+				}));
 
 		containerEl.createEl('h2', { text: 'Notebook Management' });
 		new Setting(containerEl)
@@ -1382,7 +1681,10 @@ class GeminiSettingTab extends PluginSettingTab {
 					}));
 			
 			containerEl.createEl('h3', { text: 'Trigger Words Configuration' });
-			containerEl.createEl('p', { text: 'Enable/disable specific trigger words. Use underlined text in your notes to activate.', cls: 'setting-item-description' });
+			containerEl.createEl('p', { 
+				text: 'Enable/disable specific trigger words. Underline words in your handwritten notes to activate these AI-powered actions - Gemini will detect and process them automatically.', 
+				cls: 'setting-item-description' 
+			});
 			
 			for (const action of this.plugin.settings.triggerActions) {
 				if ((action.keyword === 'Summarise' && this.plugin.settings.triggerActions.find(a => a.keyword === 'Summarize')) ||
@@ -1511,6 +1813,7 @@ class GeminiSettingTab extends PluginSettingTab {
 			'Organize': "Organizes content into clear, logical structure with categories and priorities. Underline 'Organize' or 'Organise' above content to structure."
 		};
 		
+		// Handle spelling variants
 		if (keyword === 'Summarise') return descriptions['Summarize'];
 		if (keyword === 'Analyse') return descriptions['Analyze'];
 		if (keyword === 'Organise') return descriptions['Organize'];
@@ -1528,4 +1831,3 @@ class GeminiSettingTab extends PluginSettingTab {
 		return descriptions[action] || 'Process content';
 	}
 }
-

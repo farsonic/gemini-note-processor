@@ -24,7 +24,7 @@ Process handwritten notes in Obsidian using Google Gemini AI vision capabilities
 
 ## Usage
 
-Click the camera icon in the ribbon or right-click an image file to process with Gemini.
+Click the camera icon in the ribbon or right-click an image file to process with Gemini. If you press the camera icon in a desktop instance of Obsidian it will have the user select the image to import. If you are using an IOS device it will go directly to the camera to allow you to take a photo of the page. Android devices is still a work in progress as it looks like Obsidian doesn't request camera access when it is installed. 
 
 ## Development
 ```bash
