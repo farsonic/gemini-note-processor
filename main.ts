@@ -63,6 +63,7 @@ IMPORTANT: When transcribing, preserve formatting indicators:
 - If a word appears underlined in the handwriting, format it as <u>word</u>
 - Maintain numbered or bulleted lists exactly as they appear
 - Keep the exact structure and organization of the original note
+- If a table appears convert this to a markdown table 
 
 ### Transcript
 [Provide a full, verbatim transcript of the text in the image here, preserving all formatting indicators as specified above.]
@@ -256,7 +257,7 @@ export default class GeminiNoteProcessor extends Plugin {
             
             notebookSelect.createEl('option', { 
                 value: '', 
-                text: '📄 Loose paper / No notebook' 
+                text: '📄 Loose paper or Whiteboard' 
             });
             
             const activeNotebooks = this.settings.notebooks.filter(n => n.status === 'active');
