@@ -2,6 +2,10 @@
 
 Process handwritten notes in Obsidian using Google Gemini AI vision capabilities.
 
+<a href="https://buymeacoffee.com/farsonic" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px; width: 217px;" ></a>
+
+
+
 ## Features
 - 📸 Capture handwritten notes via camera or image upload
 - 🤖 AI-powered transcription and processing with Google Gemini
