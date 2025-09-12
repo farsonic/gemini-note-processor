@@ -1,0 +1,17 @@
+# Node modules
+node_modules/
+
+# Build files
+main.js
+*.js.map
+
+# Obsidian
+data.json
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea
+.vscode/settings.json

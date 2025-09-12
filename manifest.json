@@ -1,0 +1,8 @@
+{
+	"id": "gemini-note-processor",
+	"name": "Gemini Note Processor",
+	"version": "1.0.48",
+	"author": "Francois Prowse",
+	"description": "Processes images of notes using the Google Gemini API to generate transcripts, summaries, and action items.",
+	"isDesktopOnly": false
+}
