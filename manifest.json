@@ -4,5 +4,7 @@
 	"version": "1.0.54",
 	"author": "Francois Prowse",
 	"description": "Processes images of notes using the Google Gemini API to generate transcripts, summaries, and action items.",
+	"authorUrl": "https://github.com/farsonic",
+	"fundingUrl": "https://buymeacoffee.com/farsonic",
 	"isDesktopOnly": false
 }
