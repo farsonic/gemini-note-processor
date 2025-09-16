@@ -52,7 +52,9 @@ const DEFAULT_TRIGGER_ACTIONS: TriggerAction[] = [
     { keyword: 'Questions', action: 'questions', requiresList: false, enabled: true },
     { keyword: 'Connect', action: 'connect', requiresList: false, enabled: true },
     { keyword: 'Organise', action: 'organize', requiresList: false, enabled: true }, // UK spelling
-    { keyword: 'Organize', action: 'organize', requiresList: false, enabled: true } // US spelling
+    { keyword: 'Organize', action: 'organize', requiresList: false, enabled: true }, // US spelling
+    { keyword: 'TagLinks', action: 'taglinks', requiresList: false, enabled: true },
+    { keyword: 'Related', action: 'related', requiresList: false, enabled: true }
 ];
 
 const DEFAULT_GEMINI_PROMPT = `You are an expert note-processing assistant integrated into Obsidian. I am providing you with an image of a handwritten note. 
@@ -63,7 +65,6 @@ IMPORTANT: When transcribing, preserve formatting indicators:
 - If a word appears underlined in the handwriting, format it as <u>word</u>
 - Maintain numbered or bulleted lists exactly as they appear
 - Keep the exact structure and organization of the original note
-- If a table appears convert this to a markdown table 
 
 ### Transcript
 [Provide a full, verbatim transcript of the text in the image here, preserving all formatting indicators as specified above.]
@@ -257,7 +258,7 @@ export default class GeminiNoteProcessor extends Plugin {
             
             notebookSelect.createEl('option', { 
                 value: '', 
-                text: '📄 Loose paper or Whiteboard' 
+                text: '📄 Loose paper / No notebook' 
             });
             
             const activeNotebooks = this.settings.notebooks.filter(n => n.status === 'active');
@@ -396,35 +397,246 @@ export default class GeminiNoteProcessor extends Plugin {
 	}
 
     async extractLocationFromImage(imageData: ArrayBuffer): Promise<string | null> {
+		console.log('=== Starting EXIF Location Extraction ===');
+		console.log('Image data size:', imageData.byteLength, 'bytes');
+		
 		try {
 			const buffer = Buffer.from(imageData);
-			const exifData: any = ExifReader(buffer); 
+			console.log('Buffer created, size:', buffer.length);
 			
-			if (exifData && exifData.gps && exifData.gps.Latitude && exifData.gps.Longitude) {
-				console.log("Found GPS in EXIF:", exifData.gps);
-				const country = await this.getCountryFromCoords(exifData.gps.Latitude, exifData.gps.Longitude);
-				if (country) { 
-					new Notice(`Location from photo: ${country}`); 
-					return country; 
+			// Try to parse EXIF data
+			const exifData: any = ExifReader(buffer);
+			console.log('EXIF data parsed successfully');
+			
+			// Log the entire EXIF structure to understand what we're working with
+			console.log('Full EXIF data structure:', JSON.stringify(exifData, null, 2));
+			
+			// Check different possible GPS data locations
+			if (exifData) {
+				// Log all top-level keys
+				console.log('Top-level EXIF keys:', Object.keys(exifData));
+				
+				// Check for GPS data in different possible locations
+				if (exifData.gps) {
+					console.log('Found gps object:', exifData.gps);
+					console.log('GPS object keys:', Object.keys(exifData.gps));
+					
+					// Check for different coordinate formats
+					if (exifData.gps.Latitude && exifData.gps.Longitude) {
+						console.log('GPS Latitude:', exifData.gps.Latitude);
+						console.log('GPS Longitude:', exifData.gps.Longitude);
+						
+						const country = await this.getCountryFromCoords(exifData.gps.Latitude, exifData.gps.Longitude);
+						if (country) { 
+							new Notice(`Location from photo: ${country}`); 
+							return country; 
+						}
+					}
+					
+					// Check for alternative GPS field names
+					if (exifData.gps.GPSLatitude && exifData.gps.GPSLongitude) {
+						console.log('Found GPSLatitude/GPSLongitude fields');
+						console.log('GPSLatitude:', exifData.gps.GPSLatitude);
+						console.log('GPSLongitude:', exifData.gps.GPSLongitude);
+						
+						// These might be in DMS format, need conversion
+						const lat = this.convertDMSToDD(
+							exifData.gps.GPSLatitude,
+							exifData.gps.GPSLatitudeRef
+						);
+						const lon = this.convertDMSToDD(
+							exifData.gps.GPSLongitude,
+							exifData.gps.GPSLongitudeRef
+						);
+						
+						if (lat && lon) {
+							console.log('Converted coordinates - Lat:', lat, 'Lon:', lon);
+							const country = await this.getCountryFromCoords(lat, lon);
+							if (country) {
+								new Notice(`Location from photo: ${country}`);
+								return country;
+							}
+						}
+					}
 				}
+				
+				// Check if GPS data is directly in exifData
+				if (exifData.GPSLatitude && exifData.GPSLongitude) {
+					console.log('GPS data found at root level');
+					console.log('GPSLatitude:', exifData.GPSLatitude);
+					console.log('GPSLongitude:', exifData.GPSLongitude);
+					
+					const lat = this.convertDMSToDD(
+						exifData.GPSLatitude,
+						exifData.GPSLatitudeRef
+					);
+					const lon = this.convertDMSToDD(
+						exifData.GPSLongitude,
+						exifData.GPSLongitudeRef
+					);
+					
+					if (lat && lon) {
+						console.log('Converted coordinates - Lat:', lat, 'Lon:', lon);
+						const country = await this.getCountryFromCoords(lat, lon);
+						if (country) {
+							new Notice(`Location from photo: ${country}`);
+							return country;
+						}
+					}
+				}
+				
+				// Check for already decimal coordinates
+				if (exifData.latitude && exifData.longitude) {
+					console.log('Found decimal coordinates at root');
+					console.log('Latitude:', exifData.latitude);
+					console.log('Longitude:', exifData.longitude);
+					
+					const country = await this.getCountryFromCoords(
+						exifData.latitude,
+						exifData.longitude
+					);
+					if (country) {
+						new Notice(`Location from photo: ${country}`);
+						return country;
+					}
+				}
+				
+				console.log('No recognizable GPS data format found in EXIF');
 			} else {
-				console.log("No GPS data found in EXIF");
+				console.log('EXIF data is null or undefined');
 			}
-		} catch (error) { 
-			console.log("Could not parse EXIF data:", error.message); 
+		} catch (error: any) { 
+			console.error('Error parsing EXIF data:', error);
+			console.error('Error stack:', error.stack);
+			
+			// Try alternative EXIF extraction approach
+			console.log('Attempting alternative EXIF extraction method...');
+			try {
+				const gpsData = this.extractGPSFromJPEG(imageData);
+				if (gpsData) {
+					console.log('Alternative method found GPS:', gpsData);
+					const country = await this.getCountryFromCoords(gpsData.latitude, gpsData.longitude);
+					if (country) {
+						new Notice(`Location from photo: ${country}`);
+						return country;
+					}
+				}
+			} catch (altError) {
+				console.error('Alternative EXIF extraction also failed:', altError);
+			}
 		}
 		
+		// Fallback to current location if enabled
 		if (this.settings.fallbackToCurrentLocation) {
-			console.log("Falling back to current location");
+			console.log('No GPS in photo, falling back to current location...');
 			const currentCoords = await this.getCurrentCoords();
 			if (currentCoords) {
+				console.log('Current location:', currentCoords);
 				const country = await this.getCountryFromCoords(currentCoords.latitude, currentCoords.longitude);
 				if (country) { 
 					new Notice(`Using current location: ${country}`); 
 					return country; 
 				}
+			} else {
+				console.log('Could not get current location');
 			}
 		}
+		
+		console.log('=== Location extraction completed, no location found ===');
+		return null;
+	}
+	
+	// Helper function to convert DMS (Degrees, Minutes, Seconds) to DD (Decimal Degrees)
+	convertDMSToDD(dms: any, ref: string): number | null {
+		console.log('Converting DMS to DD:', dms, 'Ref:', ref);
+		
+		if (!dms || !Array.isArray(dms) || dms.length < 3) {
+			console.log('Invalid DMS format');
+			return null;
+		}
+		
+		try {
+			let dd = dms[0] + dms[1]/60 + dms[2]/3600;
+			
+			// Apply reference direction
+			if (ref === 'S' || ref === 'W') {
+				dd = -dd;
+			}
+			
+			console.log('Converted to decimal degrees:', dd);
+			return dd;
+		} catch (error) {
+			console.error('Error converting DMS to DD:', error);
+			return null;
+		}
+	}
+	
+	// Alternative GPS extraction method for JPEG files
+	extractGPSFromJPEG(imageData: ArrayBuffer): GPSCoordinates | null {
+		console.log('Attempting manual JPEG EXIF extraction...');
+		
+		try {
+			const dataView = new DataView(imageData);
+			
+			// Check for JPEG magic number
+			if (dataView.getUint16(0) !== 0xFFD8) {
+				console.log('Not a JPEG file');
+				return null;
+			}
+			
+			let offset = 2;
+			let marker;
+			
+			// Search for EXIF marker (0xFFE1)
+			while (offset < dataView.byteLength) {
+				marker = dataView.getUint16(offset);
+				
+				if (marker === 0xFFE1) {
+					console.log('Found EXIF marker at offset:', offset);
+					
+					// Get EXIF data length
+					const exifLength = dataView.getUint16(offset + 2);
+					console.log('EXIF segment length:', exifLength);
+					
+					// Check for "Exif\0\0" header
+					if (dataView.getUint32(offset + 4) === 0x45786966 && 
+						dataView.getUint16(offset + 8) === 0x0000) {
+						console.log('Valid EXIF header found');
+						
+						// Parse TIFF header (starts at offset + 10)
+						const tiffOffset = offset + 10;
+						const littleEndian = dataView.getUint16(tiffOffset) === 0x4949;
+						console.log('Byte order:', littleEndian ? 'Little Endian' : 'Big Endian');
+						
+						// This is where more complex TIFF/IFD parsing would go
+						// For now, we'll just log that we found valid EXIF
+						console.log('Found valid EXIF data, but full parsing not implemented');
+						
+						// You could implement full TIFF/IFD parsing here if needed
+						// This would involve reading IFD entries and finding GPS IFD
+					}
+					
+					break;
+				}
+				
+				// Move to next segment
+				if ((marker & 0xFF00) === 0xFF00 && marker !== 0xFF00) {
+					// Valid marker, get segment length and skip
+					const segmentLength = dataView.getUint16(offset + 2);
+					offset += 2 + segmentLength;
+				} else {
+					offset += 1;
+				}
+			}
+			
+			if (marker !== 0xFFE1) {
+				console.log('No EXIF data found in JPEG');
+			}
+			
+		} catch (error) {
+			console.error('Error in manual JPEG EXIF extraction:', error);
+		}
+		
 		return null;
 	}
 
@@ -818,6 +1030,56 @@ export default class GeminiNoteProcessor extends Plugin {
         }
     }
 
+    async findRelatedNotesByTags(tags: string[]): Promise<string> {
+        if (!tags || tags.length === 0) return 'No tags found to search for related notes.';
+        
+        const allFiles = this.app.vault.getMarkdownFiles();
+        const currentFile = this.app.workspace.getActiveFile();
+        const relatedNotes: Map<string, {file: TFile, matchedTags: string[], matchCount: number}> = new Map();
+        
+        for (const file of allFiles) {
+            // Skip the current file
+            if (currentFile && file.path === currentFile.path) continue;
+            
+            const cache = this.app.metadataCache.getFileCache(file);
+            if (!cache?.frontmatter?.tags) continue;
+            
+            const fileTags = Array.isArray(cache.frontmatter.tags) 
+                ? cache.frontmatter.tags 
+                : [cache.frontmatter.tags];
+            
+            const matchedTags = tags.filter(tag => fileTags.includes(tag));
+            
+            if (matchedTags.length > 0) {
+                relatedNotes.set(file.path, {
+                    file,
+                    matchedTags,
+                    matchCount: matchedTags.length
+                });
+            }
+        }
+        
+        if (relatedNotes.size === 0) {
+            return 'No related notes found with matching tags.';
+        }
+        
+        // Sort by match count (most matches first)
+        const sortedNotes = Array.from(relatedNotes.values())
+            .sort((a, b) => b.matchCount - a.matchCount)
+            .slice(0, 10); // Limit to top 10 related notes
+        
+        let result = `### Related Notes by Tags\n\n`;
+        result += `Found ${relatedNotes.size} related notes. Showing top ${Math.min(10, relatedNotes.size)}:\n\n`;
+        
+        for (const note of sortedNotes) {
+            const link = `[[${note.file.basename}]]`;
+            const tagList = note.matchedTags.map(t => `#${t}`).join(', ');
+            result += `- ${link} (${note.matchCount} matching tags: ${tagList})\n`;
+        }
+        
+        return result;
+    }
+
     async processTriggersInText(text: string): Promise<string> {
         const triggers = this.detectTriggerWords(text);
         let processedTasks = false;
@@ -844,6 +1106,15 @@ export default class GeminiNoteProcessor extends Plugin {
             // Skip Tasks trigger if we already processed it for Obsidian Tasks
             if (trigger.action.keyword === 'Tasks' && processedTasks) {
                 triggerResponses.push(`### Tasks\n✅ ${trigger.content.split('\n').filter(t => t.trim()).length} tasks added to [[${this.settings.tasksNotePath.replace('.md', '')}]]`);
+                continue;
+            }
+            
+            // Handle TagLinks/Related trigger specially
+            if (trigger.action.action === 'taglinks' || trigger.action.action === 'related') {
+                new Notice(`Finding related notes by tags...`);
+                const detectedTags = this.parseDetectedTags(text);
+                const relatedNotes = await this.findRelatedNotesByTags(detectedTags);
+                triggerResponses.push(relatedNotes);
                 continue;
             }
             
@@ -1222,6 +1493,9 @@ export default class GeminiNoteProcessor extends Plugin {
             
             frontmatter.image = imageFile.name;
             
+            // Add the created date
+            frontmatter.created = window.moment().format('YYYY-MM-DD');
+            
             if (notebook) {
                 frontmatter.notebook = notebook.name;
                 frontmatter.notebook_id = notebook.id;
@@ -1448,7 +1722,9 @@ export default class GeminiNoteProcessor extends Plugin {
 			'rewrite': `Rewrite the following content in the specified style (formal/casual/technical/email/etc):\n${trigger.content}`,
 			'questions': `Generate thought-provoking questions about this topic to encourage deeper thinking:\n${trigger.content}`,
 			'connect': `Identify connections to other concepts, related topics, and interdisciplinary links for:\n${trigger.content}`,
-			'organize': `Organize the following content into a clear, logical structure with categories and priorities:\n${trigger.content}`
+			'organize': `Organize the following content into a clear, logical structure with categories and priorities:\n${trigger.content}`,
+			'taglinks': 'Finding related notes by tags...', // This is handled specially
+			'related': 'Finding related notes by tags...' // This is handled specially
 		};
 		const prompt = prompts[trigger.action.action] || `Process: ${trigger.content}`;
 		const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${this.settings.selectedModel}:generateContent?key=${this.settings.geminiApiKey}`;
@@ -1474,39 +1750,50 @@ class GeminiSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
-		
-		containerEl.createEl('h2', { text: 'Gemini Note Processor Settings' });
-
-		new Setting(containerEl)
-			.setName('Gemini API Key')
-			.setDesc('Your Google AI Studio API key for Gemini')
-			.addText(text => text
-				.setPlaceholder('Enter your API key')
-				.setValue(this.plugin.settings.geminiApiKey)
-				.onChange(async (value) => { 
-					this.plugin.settings.geminiApiKey = value; 
-					await this.plugin.saveSettings(); 
-				}));
-		
-		new Setting(containerEl)
-			.setName('Gemini Model')
-			.setDesc('Select which Gemini model to use for processing')
-			.addDropdown(dropdown => dropdown
-				.addOption('gemini-2.5-pro', 'Gemini 2.5 Pro (Enhanced reasoning)')
-				.addOption('gemini-2.5-flash', 'Gemini 2.5 Flash (Adaptive & cost efficient)')
-				.addOption('gemini-2.5-flash-lite', 'Gemini 2.5 Flash-Lite (High throughput)')
-				.addOption('gemini-2.0-flash', 'Gemini 2.0 Flash (Speed & streaming)')
-				.addOption('gemini-2.0-flash-lite', 'Gemini 2.0 Flash-Lite (Low latency)')
-				.addOption('gemini-1.5-pro', 'Gemini 1.5 Pro (Complex reasoning)')
-				.addOption('gemini-1.5-flash', 'Gemini 1.5 Flash (Fast & versatile)')
-				.setValue(this.plugin.settings.selectedModel)
-				.onChange(async (value) => { 
-					this.plugin.settings.selectedModel = value; 
-					await this.plugin.saveSettings(); 
-				}));
+    display(): void {
+        const { containerEl } = this;
+        containerEl.empty();
+        
+        containerEl.createEl('h2', { text: 'Gemini Note Processor Settings' });
+        
+        // Support/Donation Section
+        const supportSection = containerEl.createDiv({ cls: 'setting-item' });
+        supportSection.style.cssText = 'padding: 20px; background: var(--background-modifier-hover); border-radius: 8px; margin-bottom: 20px; text-align: center;';
+        
+        supportSection.createEl('p', { 
+            text: 'If you find this plugin helpful, consider supporting its development!',
+            cls: 'setting-item-description'
+        });
+        
+        const coffeeLink = supportSection.createEl('a', {
+            href: 'https://buymeacoffee.com/farsonic',
+            attr: { target: '_blank' }
+        });
+        
+        const coffeeImg = coffeeLink.createEl('img', {
+            attr: {
+                src: 'https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png',
+                alt: 'Buy Me A Coffee'
+            }
+        });
+        coffeeImg.style.cssText = 'height: 60px; width: 217px; margin-top: 10px;';
+        
+        supportSection.createEl('p', { 
+            text: '☕ Your support helps keep this plugin maintained and improved!',
+            cls: 'setting-item-description'
+        });
+        
+        // Main Settings
+        new Setting(containerEl)
+            .setName('Gemini API Key')
+            .setDesc('Your Google AI Studio API key for Gemini')
+            .addText(text => text
+                .setPlaceholder('Enter your API key')
+                .setValue(this.plugin.settings.geminiApiKey)
+                .onChange(async (value) => { 
+                    this.plugin.settings.geminiApiKey = value; 
+                    await this.plugin.saveSettings(); 
+                }));
 
 		// PROMPT CONFIGURATION SECTION - SIMPLIFIED
 		containerEl.createEl('h2', { text: 'Prompt Configuration' });
@@ -1811,7 +2098,9 @@ If no tasks are found, write "None identified."]
 			'Rewrite': "Rewrites content in a different style (formal, casual, email, etc.). Underline 'Rewrite' and specify the style, then provide content.",
 			'Questions': "Generates thought-provoking questions to encourage deeper thinking. Underline 'Questions' above your topic or content.",
 			'Connect': "Identifies connections to related concepts and interdisciplinary links. Underline 'Connect' above the concept to explore.",
-			'Organize': "Organizes content into clear, logical structure with categories and priorities. Underline 'Organize' or 'Organise' above content to structure."
+			'Organize': "Organizes content into clear, logical structure with categories and priorities. Underline 'Organize' or 'Organise' above content to structure.",
+			'TagLinks': "Finds and links to other notes with matching tags. Underline 'TagLinks' anywhere in your note to generate a related notes section.",
+			'Related': "Same as TagLinks - finds notes with matching tags. Underline 'Related' to discover connected notes in your vault."
 		};
 		
 		// Handle spelling variants
@@ -1827,7 +2116,8 @@ If no tasks are found, write "None identified."]
 			'research': 'Deep research on listed topics', 'expand': 'Expand brief notes into detailed content', 'summarize': 'Create concise summaries',
 			'actions': 'Extract and prioritize action items', 'tasks': 'Add tasks to Obsidian Tasks note', 'analyze': 'Critical analysis with pros/cons', 'define': 'Clear definitions with examples',
 			'translate': 'Translate to specified language', 'rewrite': 'Rewrite in different style', 'questions': 'Generate thought-provoking questions',
-			'connect': 'Find related concepts and connections', 'organize': 'Organize content into logical structure'
+			'connect': 'Find related concepts and connections', 'organize': 'Organize content into logical structure',
+			'taglinks': 'Find notes with matching tags', 'related': 'Find related notes by tags'
 		};
 		return descriptions[action] || 'Process content';
 	}
