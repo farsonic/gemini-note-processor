@@ -1511,90 +1511,270 @@ ${response}
             return; 
         }
 
-        const { notebook: selectedNotebook, pageNumber, cancelled } = await this.showNotebookSelectionModal();
+        const { notebook: selectedNotebook, pageNumber: initialPageNumber, cancelled } = await this.showNotebookSelectionModal();
         if (cancelled) { 
             return; 
         }
 
-        // Detect platform
+        // Start multi-page capture session
+        await this.startMultiPageCapture(selectedNotebook, initialPageNumber);
+    }
+
+    async startMultiPageCapture(selectedNotebook: Notebook | null, startingPageNumber: number | null) {
+        let currentPageNumber = startingPageNumber;
+        let pagesProcessed = 0;
+        let continueCapturing = true;
+        
+        // Detect platform once
         const userAgent = navigator.userAgent;
         const isIOS = /iPhone|iPad|iPod/i.test(userAgent);
         const isAndroid = /Android/i.test(userAgent);
         
-        // Log for debugging
-        console.log('Platform detection - iOS:', isIOS, 'Android:', isAndroid, 'UserAgent:', userAgent);
-        
-        let imageData: ArrayBuffer | null = null;
-        let sourceFileName = 'captured-image.jpg';
-
-        // Only Android gets special camera handling
-        if (isAndroid && this.settings.androidCameraMode !== 'gallery') {
-            // Try camera first on Android
-            imageData = await this.captureFromAndroidCamera();
+        while (continueCapturing) {
+            // Show current page info
+            const pageInfo = selectedNotebook && currentPageNumber 
+                ? `Page ${currentPageNumber} of ${selectedNotebook.name}` 
+                : 'Loose page';
             
-            // If camera failed and mode is 'camera', show helpful message and fall back to gallery
-            if (!imageData && this.settings.androidCameraMode === 'camera') {
-                new Notice("Camera access failed. Falling back to gallery...");
+            new Notice(`Capturing: ${pageInfo}`);
+            
+            let imageData: ArrayBuffer | null = null;
+            let sourceFileName = 'captured-image.jpg';
+            
+            // Capture logic (same as before)
+            if (isAndroid && this.settings.androidCameraMode !== 'gallery') {
+                imageData = await this.captureFromAndroidCamera();
+                if (!imageData && this.settings.androidCameraMode === 'camera') {
+                    new Notice("Camera access failed. Falling back to gallery...");
+                }
             }
-        }
-
-        // For iOS (iPhone AND iPad) or Android fallback, use file picker
-        if (!imageData) {
-            const file = await new Promise<File | null>((resolve) => {
-                const input = document.createElement('input');
-                input.type = 'file';
-                input.accept = 'image/*';
+            
+            // Single or multi-file selection
+            if (!imageData) {
+                const result = await this.selectImageFiles(isIOS, isAndroid);
                 
-                // For ALL iOS devices (iPhone, iPad, iPod), use camera capture
-                // This ensures iPad behaves exactly like iPhone
-                if (isIOS) {
-                    input.capture = 'environment';
-                    console.log('iOS device detected - camera capture enabled');
-                }
-                // On Android with camera mode, try to trigger camera through file picker
-                else if (isAndroid && this.settings.androidCameraMode === 'camera') {
-                    input.capture = 'environment';
-                    console.log('Android camera mode - capture enabled');
-                }
-                
-                input.style.display = 'none';
-                document.body.appendChild(input);
-                
-                input.onchange = () => {
-                    const selectedFile = input.files ? input.files[0] : null;
-                    if (selectedFile) {
-                        console.log('File selected:', selectedFile.name, 'Size:', selectedFile.size);
+                if (result.files && result.files.length > 0) {
+                    // Process multiple files if selected
+                    if (result.files.length > 1) {
+                        await this.processBatchImages(
+                            result.files, 
+                            selectedNotebook, 
+                            currentPageNumber
+                        );
+                        
+                        // Update page number based on files processed
+                        if (selectedNotebook && currentPageNumber) {
+                            currentPageNumber += result.files.length;
+                            selectedNotebook.currentPage = currentPageNumber;
+                            await this.saveSettings(); // FIXED: Changed from this.plugin.saveSettings()
+                        }
+                        
+                        pagesProcessed += result.files.length;
+                        continueCapturing = false; // End after batch processing
+                        continue;
+                    } else {
+                        // Single file
+                        imageData = await result.files[0].arrayBuffer();
+                        sourceFileName = result.files[0].name;
                     }
-                    document.body.removeChild(input);
-                    resolve(selectedFile);
-                };
-                
-                input.addEventListener('cancel', () => {
-                    console.log('File selection cancelled');
-                    document.body.removeChild(input);
-                    resolve(null);
-                });
-                
-                input.click();
-            });
-
-            if (file) {
-                imageData = await file.arrayBuffer();
-                sourceFileName = file.name;
+                }
             }
+            
+            if (!imageData) {
+                console.log("No image data received, ending capture session.");
+                break;
+            }
+            
+            // Process the single captured image
+            await this.processCapturedImage(imageData, sourceFileName, selectedNotebook, currentPageNumber);
+            pagesProcessed++;
+            
+            // Update page number for next capture
+            if (selectedNotebook && currentPageNumber && this.settings.autoIncrementPage) {
+                currentPageNumber++;
+                selectedNotebook.currentPage = currentPageNumber;
+                await this.saveSettings(); // FIXED: Changed from this.plugin.saveSettings()
+            }
+            
+            // Ask if user wants to continue
+            continueCapturing = await this.askToContinueCapture(pagesProcessed, selectedNotebook);
         }
-
-        if (!imageData) {
-            console.log("No image data received, aborting process.");
-            return;
+        
+        // Final summary
+        if (pagesProcessed > 0) {
+            new Notice(`✅ Successfully processed ${pagesProcessed} page${pagesProcessed > 1 ? 's' : ''}`);
         }
-
-        console.log('Processing image:', sourceFileName, 'Size:', imageData.byteLength);
-        await this.processCapturedImage(imageData, sourceFileName, selectedNotebook, pageNumber);
     }
 
-    async processCapturedImage(imageData: ArrayBuffer, sourceFileName: string, selectedNotebook: Notebook | null, pageNumber: number | null) {
-        new Notice("Uploading and processing image...");
+    async selectImageFiles(isIOS: boolean, isAndroid: boolean): Promise<{files: File[]}> {
+        return new Promise((resolve) => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = 'image/*';
+            
+            // Enable multiple file selection
+            input.multiple = true;
+            
+            // For iOS devices, still enable camera capture for single photos
+            if (isIOS) {
+                input.capture = 'environment';
+            } else if (isAndroid && this.settings.androidCameraMode === 'camera') {
+                input.capture = 'environment';
+            }
+            
+            input.style.display = 'none';
+            document.body.appendChild(input);
+            
+            input.onchange = () => {
+                const files = input.files ? Array.from(input.files) : [];
+                document.body.removeChild(input);
+                
+                // Sort files by name to maintain order
+                files.sort((a, b) => a.name.localeCompare(b.name));
+                
+                if (files.length > 1) {
+                    new Notice(`Selected ${files.length} images for batch processing`);
+                }
+                
+                resolve({ files });
+            };
+            
+            input.addEventListener('cancel', () => {
+                document.body.removeChild(input);
+                resolve({ files: [] });
+            });
+            
+            input.click();
+        });
+    }
+
+    async processBatchImages(
+        files: File[], 
+        selectedNotebook: Notebook | null, 
+        startingPageNumber: number | null
+    ) {
+        const progressNotice = new Notice(`Processing ${files.length} images...`, 0);
+        let currentPageNumber = startingPageNumber;
+        
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            progressNotice.setMessage(`Processing image ${i + 1} of ${files.length}: ${file.name}`);
+            
+            try {
+                const imageData = await file.arrayBuffer();
+                await this.processCapturedImage(
+                    imageData, 
+                    file.name, 
+                    selectedNotebook, 
+                    currentPageNumber
+                );
+                
+                // Increment page number for next image
+                if (selectedNotebook && currentPageNumber) {
+                    currentPageNumber++;
+                }
+                
+                // Small delay between processing to avoid overwhelming the API
+                if (i < files.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            } catch (error) {
+                console.error(`Error processing ${file.name}:`, error);
+                new Notice(`Failed to process ${file.name}. Continuing with next image...`);
+            }
+        }
+        
+        progressNotice.hide();
+    }
+
+    async askToContinueCapture(pagesProcessed: number, notebook: Notebook | null): Promise<boolean> {
+        return new Promise((resolve) => {
+            const modal = new Modal(this.app);
+            modal.titleEl.setText('Continue Capturing?');
+            
+            const content = modal.contentEl;
+            content.style.cssText = 'text-align: center; padding: 20px;';
+            
+            // Show progress
+            const progressDiv = content.createDiv();
+            progressDiv.style.cssText = 'margin-bottom: 20px;';
+            progressDiv.innerHTML = `
+                <div style="font-size: 24px; margin-bottom: 10px;">📸</div>
+                <h3>${pagesProcessed} page${pagesProcessed > 1 ? 's' : ''} captured</h3>
+                ${notebook ? `<p>Notebook: ${notebook.name}</p>` : '<p>Loose pages</p>'}
+            `;
+            
+            content.createEl('p', { 
+                text: 'Would you like to add another page?',
+                cls: 'setting-item-description'
+            });
+            
+            const buttonContainer = content.createDiv();
+            buttonContainer.style.cssText = 'display: flex; gap: 10px; justify-content: center; margin-top: 20px;';
+            
+            // Continue button (primary)
+            const continueBtn = buttonContainer.createEl('button', { 
+                text: '📸 Add Another Page',
+                cls: 'mod-cta'
+            });
+            continueBtn.style.cssText = 'flex: 1;';
+            
+            // Done button
+            const doneBtn = buttonContainer.createEl('button', { 
+                text: '✅ Done'
+            });
+            doneBtn.style.cssText = 'flex: 1;';
+            
+            // Quick batch options
+            const batchDiv = content.createDiv();
+            batchDiv.style.cssText = 'margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--background-modifier-border);';
+            batchDiv.createEl('p', { 
+                text: '💡 Tip: You can select multiple images at once from your gallery',
+                cls: 'setting-item-description'
+            });
+            
+            continueBtn.onclick = () => {
+                modal.close();
+                resolve(true);
+            };
+            
+            doneBtn.onclick = () => {
+                modal.close();
+                resolve(false);
+            };
+            
+            // Allow Enter key to continue quickly
+            modal.scope.register([], 'Enter', () => {
+                modal.close();
+                resolve(true);
+            });
+            
+            // Allow Escape to finish
+            modal.scope.register([], 'Escape', () => {
+                modal.close();
+                resolve(false);
+            });
+            
+            modal.open();
+            
+            // Focus the continue button for quick keyboard navigation
+            setTimeout(() => continueBtn.focus(), 100);
+        });
+    }
+
+    async processCapturedImage(
+        imageData: ArrayBuffer, 
+        sourceFileName: string, 
+        selectedNotebook: Notebook | null, 
+        pageNumber: number | null,
+        isBatchMode: boolean = false
+    ) {
+        const quietMode = isBatchMode; // Less noisy in batch mode
+        
+        if (!quietMode) {
+            new Notice("Uploading and processing image...");
+        }
+        
         try {
             let noteFolder = "";
             if (selectedNotebook && this.settings.groupByNotebook) {
@@ -1635,37 +1815,38 @@ ${response}
             
             const noteFilePath = noteFolder ? `${noteFolder}/${noteFileName}` : noteFileName;
             
-            // Build note content with discussion link at the top
+            // Build note content
             let noteContent = '';
             
-            // Add discussion link at the very top (it will appear right after properties)
             if (this.settings.enableDiscussionLinks) {
                 const encodedPath = encodeURIComponent(noteFilePath);
                 noteContent += `[${this.settings.discussionLinkText}](obsidian://gemini-discuss?file=${encodedPath})\n\n`;
             }
             
-            // Add image
             noteContent += `![[${imageFile.path}]]\n`;
             
-            // Add notebook info if applicable
             if (selectedNotebook && pageNumber) {
                 noteContent += `\n> **Notebook:** ${selectedNotebook.name} | **Page:** ${pageNumber}\n`;
             } else if (!selectedNotebook) {
                 noteContent += `\n> **Source:** Loose paper / No notebook\n`;
             }
             
-            // Add the main content
             noteContent += `\n---\n${resultText}\n---`;
             
             const newNoteFile = await this.app.vault.create(noteFilePath, noteContent);
             await this.updateNoteProperties(imageFile, newNoteFile, detectedTags, locationTag, selectedNotebook?.id || null, pageNumber);
             
-            this.app.workspace.openLinkText(newNoteFile.path, '', true);
-            new Notice("New note created successfully!");
+            if (!quietMode) {
+                this.app.workspace.openLinkText(newNoteFile.path, '', true);
+                new Notice("New note created successfully!");
+            }
 
         } catch (error) {
             console.error("Error creating note from image:", error);
-            new Notice("Failed to create note. See console.");
+            if (!quietMode) {
+                new Notice("Failed to create note. See console.");
+            }
+            throw error; // Re-throw for batch processing to handle
         }
     }
 
