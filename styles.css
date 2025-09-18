@@ -1,8 +1,340 @@
-/*
+.page-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 15px;
+    padding: 10px;
+}
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.page-card {
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: pointer;
+    background: var(--background-primary);
+    transition: all 0.2s ease;
+    display: flex;
+    flex-direction: column;
+}
 
-If your plugin does not need CSS, delete this file.
+.page-card:hover {
+    transform: scale(1.02);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+}
 
-*/
+.page-card.selected {
+    border-color: var(--interactive-success);
+    background: var(--background-modifier-hover);
+}
+
+.page-card.new-page {
+    border: 2px dashed var(--interactive-accent);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 250px;
+    background: var(--background-primary);
+}
+
+.page-preview {
+    height: 150px;
+    background: var(--background-modifier-hover);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    position: relative;
+}
+
+.page-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.page-info {
+    padding: 10px;
+}
+
+.page-title {
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+.page-filename {
+    font-size: 11px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.page-date {
+    font-size: 10px;
+    color: var(--text-faint);
+    margin-top: 3px;
+}
+
+/* Quick Actions */
+.quick-actions {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.quick-actions button {
+    font-size: 11px;
+    padding: 3px 6px;
+}
+
+/* Input Container */
+.input-container {
+    display: flex;
+    gap: 8px;
+}
+
+/* Animation */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Mobile Optimizations */
+@media (max-width: 768px) {
+    .gemini-chat-view {
+        font-size: 14px;
+    }
+    
+    .gemini-message {
+        max-width: 90%;
+    }
+    
+    .page-grid {
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 10px;
+    }
+    
+    .page-card {
+        font-size: 12px;
+    }
+    
+    .quick-actions {
+        display: none;
+    }
+}
+
+/* Dark Mode Support */
+.theme-dark .gemini-message-assistant {
+    background: var(--background-secondary-alt);
+}
+
+.theme-dark .page-card {
+    background: var(--background-secondary);
+}
+
+.theme-dark .page-card:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+/* Chat Divider */
+.chat-divider {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 11px;
+    margin: 10px 0;
+    position: relative;
+}
+
+.chat-divider::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 100%;
+    height: 1px;
+    background: var(--background-modifier-border);
+    z-index: -1;
+}
+
+.chat-divider span {
+    background: var(--background-primary);
+    padding: 0 10px;
+}
+
+/* Camera Modal Styles */
+.camera-container {
+    position: relative;
+    width: 100%;
+    max-width: 500px;
+    margin: 0 auto;
+}
+
+.camera-video {
+    width: 100%;
+    height: auto;
+    border-radius: 8px;
+}
+
+.camera-buttons {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    margin-top: 15px;
+}
+
+.camera-error {
+    padding: 20px;
+    text-align: center;
+}
+
+/* Capture Options */
+.capture-option {
+    padding: 15px;
+    margin: 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.capture-option:hover {
+    border-color: var(--interactive-accent);
+    background: var(--background-modifier-hover);
+}
+
+/* Support Section */
+.support-section {
+    padding: 20px;
+    background: var(--background-modifier-hover);
+    border-radius: 8px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+/* Scrollbar Styling */
+.gemini-chat-messages::-webkit-scrollbar {
+    width: 8px;
+}
+
+.gemini-chat-messages::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.gemini-chat-messages::-webkit-scrollbar-thumb {
+    background: var(--background-modifier-border);
+    border-radius: 4px;
+}
+
+.gemini-chat-messages::-webkit-scrollbar-thumb:hover {
+    background: var(--background-modifier-border-hover);
+}
+
+/* Loading Animation */
+.gemini-message.loading {
+    opacity: 0.6;
+}
+
+.gemini-message.loading::after {
+    content: "...";
+    animation: dots 1.4s infinite;
+}
+
+@keyframes dots {
+    0%, 20% {
+        content: ".";
+    }
+    40% {
+        content: "..";
+    }
+    60%, 100% {
+        content: "...";
+    }
+}
+
+/* Settings Tab Styles */
+.setting-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.setting-item-description {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+/* Modal Button Container */
+.modal-button-container {
+    padding: 15px;
+    border-top: 1px solid var(--background-modifier-border);
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+/* Responsive Table/Grid for Settings */
+.notebooks-grid {
+    display: grid;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.notebook-item {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto auto;
+    gap: 10px;
+    align-items: center;
+    padding: 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 5px;
+}
+
+/* Toast/Notice Override for Better Mobile */
+.notice {
+    max-width: 90vw;
+    word-wrap: break-word;
+}
+
+/* Accessibility */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+    outline: 2px solid var(--interactive-accent);
+    outline-offset: 2px;
+}
+
+/* High Contrast Mode Support */
+@media (prefers-contrast: high) {
+    .page-card {
+        border-width: 2px;
+    }
+    
+    .gemini-message {
+        border: 1px solid var(--text-normal);
+    }
+}
+
+/* Print Styles */
+@media print {
+    .gemini-chat-input,
+    .quick-actions,
+    .camera-buttons {
+        display: none;
+    }
+    
+    .gemini-chat-messages {
+        max-height: none;
+        overflow: visible;
+    }
+}

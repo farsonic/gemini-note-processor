@@ -1,4 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, requestUrl, Editor, moment, Modal } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, requestUrl, Editor, moment, Modal, MarkdownView, MarkdownRenderer, Platform, ItemView, WorkspaceLeaf } from 'obsidian';
 const ExifReader = require('exif-reader');
 
 // Helper function to convert ArrayBuffer to Base64 (works on mobile)
@@ -11,6 +11,9 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
     }
     return window.btoa(binary);
 }
+
+// Constants
+const GEMINI_CHAT_VIEW = 'gemini-chat-view';
 
 // Interfaces
 interface GPSCoordinates {
@@ -110,6 +113,8 @@ interface GeminiNoteProcessorSettings {
     taskPriorities: boolean;
     defaultTaskTags: string;
     geminiPrompt: string;
+    enableDiscussionLinks: boolean;
+    discussionLinkText: string;
 }
 
 const DEFAULT_SETTINGS: GeminiNoteProcessorSettings = {
@@ -136,9 +141,345 @@ const DEFAULT_SETTINGS: GeminiNoteProcessorSettings = {
     tasksSectionHeading: '## Captured Tasks',
     taskPriorities: true,
     defaultTaskTags: '#captured',
-    geminiPrompt: DEFAULT_GEMINI_PROMPT
+    geminiPrompt: DEFAULT_GEMINI_PROMPT,
+    enableDiscussionLinks: true,
+    discussionLinkText: '💬 Discuss this note with Gemini'
 }
 
+// Chat View Class
+export class GeminiChatView extends ItemView {
+    plugin: GeminiNoteProcessor;
+    noteContent: string;
+    sourceFile: TFile | null;
+    chatContainer: HTMLElement;
+    inputField: HTMLTextAreaElement;
+    sendButton: HTMLButtonElement;
+    sourceFileDisplay: HTMLElement;
+
+    constructor(leaf: WorkspaceLeaf, plugin: GeminiNoteProcessor) {
+        super(leaf);
+        this.plugin = plugin;
+        this.noteContent = '';
+        this.sourceFile = null;
+    }
+
+    getViewType() {
+        return GEMINI_CHAT_VIEW;
+    }
+
+    getDisplayText() {
+        return 'Gemini Chat';
+    }
+
+    getIcon() {
+        return 'message-circle';
+    }
+
+    async onOpen() {
+        const containerEl = this.containerEl.children[1];
+        if (!(containerEl instanceof HTMLElement)) {
+            console.error('Container element is not an HTMLElement');
+            return;
+        }
+        const container = containerEl;
+        container.empty();
+        container.addClass('gemini-chat-view');
+
+        // Create chat UI
+        this.createChatInterface(container);
+        
+        // Load current note if available
+        const activeFile = this.app.workspace.getActiveFile();
+        if (activeFile) {
+            await this.loadNote(activeFile);
+        }
+    }
+
+    createChatInterface(container: HTMLElement) {
+        // Make container flex
+        container.style.cssText = `
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        `;
+
+        // Header
+        const header = container.createDiv({ cls: 'gemini-chat-header' });
+        header.style.cssText = `
+            padding: 10px;
+            border-bottom: 1px solid var(--background-modifier-border);
+            background: var(--background-secondary);
+            flex-shrink: 0;
+        `;
+        
+        const titleEl = header.createEl('h4', { text: 'Chat with Gemini' });
+        titleEl.style.cssText = 'margin: 0; font-size: 14px;';
+        
+        this.sourceFileDisplay = header.createEl('div', { 
+            cls: 'source-file',
+            text: 'No note loaded'
+        });
+        this.sourceFileDisplay.style.cssText = `
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        `;
+
+        // Chat messages container
+        this.chatContainer = container.createDiv({ cls: 'gemini-chat-messages' });
+        this.chatContainer.style.cssText = `
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        `;
+
+        // Input area at bottom
+        const inputArea = container.createDiv({ cls: 'gemini-chat-input' });
+        inputArea.style.cssText = `
+            padding: 10px;
+            border-top: 1px solid var(--background-modifier-border);
+            background: var(--background-primary);
+            flex-shrink: 0;
+        `;
+
+        // Quick actions
+        const quickActions = inputArea.createDiv({ cls: 'quick-actions' });
+        quickActions.style.cssText = `
+            display: flex;
+            gap: 5px;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        `;
+
+        const quickPrompts = [
+            { icon: '💡', text: 'Elaborate', prompt: 'Can you elaborate on the main points?' },
+            { icon: '❓', text: 'Questions', prompt: 'What questions should I be asking?' },
+            { icon: '🔗', text: 'Related', prompt: 'What related topics should I explore?' }
+        ];
+
+        quickPrompts.forEach(({ icon, text, prompt }) => {
+            const btn = quickActions.createEl('button', { 
+                text: `${icon} ${text}`,
+                cls: 'clickable-icon'
+            });
+            btn.style.cssText = 'font-size: 11px; padding: 3px 6px;';
+            btn.onclick = () => {
+                this.inputField.value = prompt;
+                this.sendMessage();
+            };
+        });
+
+        // Input container
+        const inputContainer = inputArea.createDiv({ cls: 'input-container' });
+        inputContainer.style.cssText = 'display: flex; gap: 8px;';
+
+        this.inputField = inputContainer.createEl('textarea', {
+            cls: 'gemini-input',
+            attr: {
+                placeholder: 'Ask Gemini about this note...',
+                rows: '2'
+            }
+        });
+        this.inputField.style.cssText = `
+            flex: 1;
+            resize: none;
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px solid var(--background-modifier-border);
+            font-size: 14px;
+        `;
+
+        this.sendButton = inputContainer.createEl('button', {
+            cls: 'mod-cta',
+            text: '➤'
+        });
+        this.sendButton.style.cssText = `
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            align-self: flex-end;
+        `;
+
+        // Event handlers
+        this.sendButton.onclick = () => this.sendMessage();
+        this.inputField.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.sendMessage();
+            }
+        });
+
+        // Auto-resize textarea
+        this.inputField.addEventListener('input', () => {
+            this.inputField.style.height = 'auto';
+            this.inputField.style.height = Math.min(this.inputField.scrollHeight, 120) + 'px';
+        });
+    }
+
+    async loadNote(file: TFile) {
+        this.sourceFile = file;
+        this.noteContent = await this.app.vault.read(file);
+        this.sourceFileDisplay.setText(`Discussing: ${file.basename}`);
+        
+        // Clear previous chat
+        this.chatContainer.empty();
+        
+        // Load existing discussion if it exists
+        const discussionPath = await this.getDiscussionPath(file);
+        const discussionFile = this.app.vault.getAbstractFileByPath(discussionPath);
+        
+        if (discussionFile instanceof TFile) {
+            const content = await this.app.vault.read(discussionFile);
+            const entries = this.parseDiscussionHistory(content);
+            
+            entries.forEach(entry => {
+                this.addMessage(entry.question, 'user');
+                this.addMessage(entry.response, 'assistant');
+            });
+            
+            if (entries.length > 0) {
+                this.addDivider('Previous discussion loaded');
+            }
+        }
+        
+        // Add welcome message if no history
+        if (this.chatContainer.children.length === 0) {
+            this.addMessage(`I'm ready to discuss "${file.basename}". What would you like to know?`, 'assistant');
+        }
+    }
+
+    async sendMessage() {
+        const message = this.inputField.value.trim();
+        if (!message || !this.sourceFile) return;
+
+        // Disable input
+        this.inputField.disabled = true;
+        this.sendButton.disabled = true;
+
+        // Add user message
+        this.addMessage(message, 'user');
+
+        // Clear input
+        this.inputField.value = '';
+        this.inputField.style.height = 'auto';
+
+        // Add loading indicator
+        const loadingEl = this.addMessage('Thinking...', 'assistant');
+        loadingEl.style.opacity = '0.6';
+
+        try {
+            // Get response from Gemini
+            const response = await this.plugin.discussWithGemini(this.noteContent, message);
+            
+            // Remove loading
+            this.chatContainer.removeChild(loadingEl);
+            
+            // Add response
+            this.addMessage(response, 'assistant');
+            
+            // Save to discussion file
+            if (this.sourceFile) {
+                const discussionPath = await this.getDiscussionPath(this.sourceFile);
+                await this.plugin.appendToDiscussionFile(
+                    discussionPath, 
+                    message, 
+                    response, 
+                    this.sourceFile
+                );
+            }
+        } catch (error) {
+            this.chatContainer.removeChild(loadingEl);
+            this.addMessage('Failed to get response. Please try again.', 'error');
+            console.error('Gemini chat error:', error);
+        } finally {
+            this.inputField.disabled = false;
+            this.sendButton.disabled = false;
+            this.inputField.focus();
+        }
+    }
+
+    addMessage(content: string, type: 'user' | 'assistant' | 'error'): HTMLElement {
+        const messageEl = this.chatContainer.createDiv({
+            cls: `gemini-message gemini-message-${type}`
+        });
+        
+        const baseStyle = `
+            padding: 10px 14px;
+            border-radius: 12px;
+            max-width: 85%;
+            word-wrap: break-word;
+        `;
+        
+        if (type === 'user') {
+            messageEl.style.cssText = baseStyle + `
+                background: var(--interactive-accent);
+                color: var(--text-on-accent);
+                align-self: flex-end;
+                margin-left: auto;
+            `;
+        } else if (type === 'assistant') {
+            messageEl.style.cssText = baseStyle + `
+                background: var(--background-secondary);
+                align-self: flex-start;
+            `;
+        } else {
+            messageEl.style.cssText = baseStyle + `
+                background: var(--background-modifier-error);
+                align-self: center;
+            `;
+        }
+        
+        // Render markdown
+        MarkdownRenderer.renderMarkdown(content, messageEl, '', this.plugin);
+        
+        // Scroll to bottom
+        this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
+        
+        return messageEl;
+    }
+
+    addDivider(text: string) {
+        const divider = this.chatContainer.createDiv({ cls: 'chat-divider' });
+        divider.style.cssText = `
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 11px;
+            margin: 10px 0;
+            position: relative;
+        `;
+        divider.setText(text);
+    }
+
+    async getDiscussionPath(file: TFile): Promise<string> {
+        const folder = file.parent?.path || '';
+        const name = `${file.basename} - Discussion.md`;
+        return folder ? `${folder}/${name}` : name;
+    }
+
+    parseDiscussionHistory(content: string): Array<{question: string, response: string}> {
+        const entries: Array<{question: string, response: string}> = [];
+        const entryRegex = /## Discussion Entry - .*?\n\n\*\*Question:\*\* (.*?)\n\n\*\*Gemini's Response:\*\*\n([\s\S]*?)(?=\n---\n|$)/g;
+        let match;
+        
+        while ((match = entryRegex.exec(content)) !== null) {
+            entries.push({
+                question: match[1],
+                response: match[2].trim()
+            });
+        }
+        
+        return entries;
+    }
+
+    async onClose() {
+        // Cleanup if needed
+    }
+}
+
+// Main Plugin Class
 export default class GeminiNoteProcessor extends Plugin {
     settings: GeminiNoteProcessorSettings;
 
@@ -146,9 +487,64 @@ export default class GeminiNoteProcessor extends Plugin {
         await this.loadSettings();
         this.addSettingTab(new GeminiSettingTab(this.app, this));
 
+        // Register the chat view
+        this.registerView(
+            GEMINI_CHAT_VIEW,
+            (leaf) => new GeminiChatView(leaf, this)
+        );
+
         this.addRibbonIcon('camera', 'Create note from camera or file', () => {
             this.createNoteFromImageCapture();
         });
+
+        // Add command to open chat view
+        this.addCommand({
+            id: 'open-gemini-chat',
+            name: 'Open Gemini Chat',
+            callback: () => this.activateChatView()
+        });
+
+        // Register the protocol handler for discussion links
+        this.registerObsidianProtocolHandler('gemini-discuss', async (params) => {
+            const filePath = decodeURIComponent(params.file);
+            const file = this.app.vault.getAbstractFileByPath(filePath);
+            if (file instanceof TFile) {
+                await this.activateChatView();
+                const view = this.getChatView();
+                if (view) {
+                    await view.loadNote(file);
+                }
+            }
+        });
+
+        // Add command for discussing current note
+        this.addCommand({
+            id: 'discuss-with-gemini',
+            name: 'Discuss current note with Gemini',
+            editorCallback: async (editor: Editor) => {
+                const file = this.app.workspace.getActiveFile();
+                if (file) {
+                    await this.activateChatView();
+                    const view = this.getChatView();
+                    if (view) {
+                        await view.loadNote(file);
+                    }
+                }
+            }
+        });
+
+        // Auto-load note when file changes
+        this.registerEvent(
+            this.app.workspace.on('active-leaf-change', async (leaf) => {
+                const view = this.getChatView();
+                if (view && leaf?.view instanceof MarkdownView) {
+                    const file = leaf.view.file;
+                    if (file) {
+                        await view.loadNote(file);
+                    }
+                }
+            })
+        );
 
         this.registerEvent(
             this.app.workspace.on('file-menu', (menu, file) => {
@@ -166,6 +562,35 @@ export default class GeminiNoteProcessor extends Plugin {
     }
 
     onunload() { }
+
+    async activateChatView() {
+        const existing = this.app.workspace.getLeavesOfType(GEMINI_CHAT_VIEW);
+        
+        if (existing.length) {
+            // Reveal existing view
+            this.app.workspace.revealLeaf(existing[0]);
+            return existing[0];
+        }
+        
+        // Create new view in right sidebar
+        const rightLeaf = this.app.workspace.getRightLeaf(false);
+        if (rightLeaf) {
+            await rightLeaf.setViewState({
+                type: GEMINI_CHAT_VIEW,
+                active: true
+            });
+            this.app.workspace.revealLeaf(rightLeaf);
+            return rightLeaf;
+        }
+    }
+    
+    getChatView(): GeminiChatView | null {
+        const leaves = this.app.workspace.getLeavesOfType(GEMINI_CHAT_VIEW);
+        if (leaves.length) {
+            return leaves[0].view as GeminiChatView;
+        }
+        return null;
+    }
 
     async loadSettings() {
         const loadedData = await this.loadData();
@@ -197,12 +622,100 @@ export default class GeminiNoteProcessor extends Plugin {
         if (!this.settings.geminiPrompt || this.settings.geminiPrompt.trim() === '') {
             console.log('Initializing Gemini prompt to default');
             this.settings.geminiPrompt = DEFAULT_GEMINI_PROMPT;
-            await this.saveSettings(); // Save it immediately
+            await this.saveSettings();
+        }
+        // Initialize discussion settings
+        if (this.settings.enableDiscussionLinks === undefined) {
+            this.settings.enableDiscussionLinks = true;
+        }
+        if (!this.settings.discussionLinkText) {
+            this.settings.discussionLinkText = '💬 Discuss this note with Gemini';
         }
     }
 
     async saveSettings() {
         await this.saveData(this.settings);
+    }
+
+    async discussWithGemini(noteContent: string, userPrompt: string): Promise<string> {
+        const apiKey = this.settings.geminiApiKey;
+        const model = this.settings.selectedModel;
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        
+        const prompt = `You are having a discussion about a note that was previously processed. Here is the note content:
+
+---
+${noteContent}
+---
+
+The user has a follow-up question or request:
+"${userPrompt}"
+
+Please provide a helpful, detailed, and thoughtful response based on the note content and their question. If appropriate, suggest related topics to explore, provide examples, or offer actionable insights.`;
+        
+        const requestBody = {
+            contents: [{
+                parts: [{ text: prompt }]
+            }]
+        };
+        
+        try {
+            const response = await requestUrl({
+                url: API_URL,
+                method: 'POST',
+                contentType: 'application/json',
+                body: JSON.stringify(requestBody)
+            });
+            
+            if (response.json.candidates?.[0]?.content?.parts?.[0]?.text) {
+                return response.json.candidates[0].content.parts[0].text;
+            } else {
+                throw new Error('No valid response from Gemini');
+            }
+        } catch (error) {
+            console.error('Gemini discussion failed:', error);
+            throw error;
+        }
+    }
+
+    async appendToDiscussionFile(discussionPath: string, question: string, response: string, sourceFile: TFile) {
+        let discussionFile = this.app.vault.getAbstractFileByPath(discussionPath);
+        const timestamp = window.moment().format('YYYY-MM-DD HH:mm');
+        
+        if (discussionFile instanceof TFile) {
+            // Append to existing discussion
+            const existingContent = await this.app.vault.read(discussionFile);
+            const newEntry = `
+
+---
+
+## Discussion Entry - ${timestamp}
+
+**Question:** ${question}
+
+**Gemini's Response:**
+${response}`;
+            
+            const updatedContent = existingContent + newEntry;
+            await this.app.vault.modify(discussionFile, updatedContent);
+            
+        } else {
+            // Create new discussion note
+            const discussionContent = `# Discussion: [[${sourceFile.basename}]]
+
+## Discussion Entry - ${timestamp}
+
+**Question:** ${question}
+
+**Gemini's Response:**
+${response}
+
+---
+*Source note: [[${sourceFile.basename}]]*
+*Created: ${timestamp}*`;
+            
+            await this.app.vault.create(discussionPath, discussionContent);
+        }
     }
 
     async getNotebookFolder(notebookId: string): Promise<string> {
@@ -240,21 +753,34 @@ export default class GeminiNoteProcessor extends Plugin {
         
         return new Promise((resolve) => {
             const modal = new Modal(this.app);
-            modal.titleEl.setText('Select Notebook');
+            modal.titleEl.setText('Select Notebook & Page');
+            
+            // Make modal larger for visual browser
+            modal.modalEl.style.cssText = `
+                width: 90vw;
+                max-width: 1200px;
+                height: 80vh;
+                max-height: 800px;
+            `;
             
             let selectedNotebook: Notebook | null = null;
             let pageNumber: number | null = null;
             
             const formContainer = modal.contentEl.createDiv();
+            formContainer.style.cssText = 'display: flex; flex-direction: column; height: 100%;';
             
-            formContainer.createEl('p', { 
-                text: 'Which notebook is this page from?',
-                cls: 'setting-item-description'
-            });
+            // Top section: Notebook selector
+            const headerSection = formContainer.createDiv({ cls: 'notebook-header' });
+            headerSection.style.cssText = 'padding: 15px; border-bottom: 1px solid var(--background-modifier-border); flex-shrink: 0;';
             
-            const notebookContainer = formContainer.createDiv({ cls: 'setting-item' });
+            headerSection.createEl('h3', { text: 'Choose Notebook' });
+            
+            const notebookContainer = headerSection.createDiv({ cls: 'setting-item' });
+            notebookContainer.style.cssText = 'display: flex; align-items: center; gap: 15px;';
+            
             notebookContainer.createEl('label', { text: 'Notebook:' });
             const notebookSelect = notebookContainer.createEl('select', { cls: 'dropdown' });
+            notebookSelect.style.cssText = 'flex: 1; max-width: 300px;';
             
             notebookSelect.createEl('option', { 
                 value: '', 
@@ -267,7 +793,7 @@ export default class GeminiNoteProcessor extends Plugin {
                 activeNotebooks.forEach(notebook => {
                     activeGroup.createEl('option', {
                         value: notebook.id,
-                        text: `📓 ${notebook.name} (Current page: ${notebook.currentPage})`
+                        text: `📓 ${notebook.name} (${notebook.currentPage} pages)`
                     });
                 });
             }
@@ -283,29 +809,318 @@ export default class GeminiNoteProcessor extends Plugin {
                 });
             }
             
-            if (this.settings.currentNotebookId) {
-                notebookSelect.value = this.settings.currentNotebookId;
-                selectedNotebook = this.settings.notebooks.find(n => n.id === this.settings.currentNotebookId) || null;
-            }
-            
-            const pageContainer = formContainer.createDiv({ cls: 'setting-item' });
-            pageContainer.style.display = selectedNotebook ? 'flex' : 'none';
-            pageContainer.createEl('label', { text: 'Page number:' });
-            const pageInput = pageContainer.createEl('input', {
+            // Page number input for new pages
+            const newPageContainer = notebookContainer.createDiv({ cls: 'new-page-input' });
+            newPageContainer.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+            newPageContainer.createEl('label', { text: 'New page #:' });
+            const pageInput = newPageContainer.createEl('input', {
                 type: 'number',
                 attr: { 
                     min: '1',
-                    placeholder: 'Enter page number'
+                    placeholder: 'Page number'
+                }
+            });
+            pageInput.style.cssText = 'width: 100px;';
+            
+            // Visual page browser section
+            const browserSection = formContainer.createDiv({ cls: 'page-browser' });
+            browserSection.style.cssText = 'flex: 1; overflow-y: auto; padding: 15px; background: var(--background-secondary);';
+            
+            const browserHeader = browserSection.createDiv();
+            browserHeader.style.cssText = 'margin-bottom: 15px;';
+            const browserTitle = browserHeader.createEl('h4', { text: 'Recent Pages' });
+            const pageCount = browserHeader.createEl('span', { 
+                cls: 'setting-item-description',
+                text: ' - Select a page or enter a new page number above'
+            });
+            
+            // Grid container for page thumbnails
+            const pageGrid = browserSection.createDiv({ cls: 'page-grid' });
+            pageGrid.style.cssText = `
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                gap: 15px;
+                padding: 10px;
+            `;
+            
+            // Function to load pages for a notebook
+            const loadNotebookPages = async (notebookId: string) => {
+                pageGrid.empty();
+                
+                if (!notebookId) {
+                    // Show recent loose pages
+                    browserTitle.setText('Recent Loose Pages');
+                    await loadLoosePages();
+                    return;
+                }
+                
+                const notebook = this.settings.notebooks.find(n => n.id === notebookId);
+                if (!notebook) return;
+                
+                selectedNotebook = notebook;
+                browserTitle.setText(`Pages from ${notebook.name}`);
+                pageInput.value = notebook.currentPage.toString();
+                pageNumber = notebook.currentPage;
+                
+                // Find all notes with this notebook ID
+                const allFiles = this.app.vault.getMarkdownFiles();
+                const notebookPages: Array<{file: TFile, page: number, image?: string}> = [];
+                
+                for (const file of allFiles) {
+                    const cache = this.app.metadataCache.getFileCache(file);
+                    if (cache?.frontmatter?.notebook_id === notebookId) {
+                        const pageNum = cache.frontmatter.page || 0;
+                        const imageName = cache.frontmatter.image;
+                        notebookPages.push({ file, page: pageNum, image: imageName });
+                    }
+                }
+                
+                // Sort by page number
+                notebookPages.sort((a, b) => b.page - a.page);
+                
+                pageCount.setText(` - ${notebookPages.length} pages found`);
+                
+                // Create "Add New Page" card first
+                const newPageCard = pageGrid.createDiv({ cls: 'page-card new-page' });
+                newPageCard.style.cssText = `
+                    border: 2px dashed var(--interactive-accent);
+                    border-radius: 8px;
+                    padding: 20px;
+                    cursor: pointer;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                    min-height: 250px;
+                    background: var(--background-primary);
+                    transition: all 0.2s ease;
+                `;
+                
+                newPageCard.innerHTML = `
+                    <div style="font-size: 48px; margin-bottom: 10px;">➕</div>
+                    <div style="font-weight: bold;">Add New Page</div>
+                    <div style="color: var(--text-muted); font-size: 12px; margin-top: 5px;">Page ${notebook.currentPage}</div>
+                `;
+                
+                newPageCard.addEventListener('mouseenter', () => {
+                    newPageCard.style.transform = 'scale(1.02)';
+                    newPageCard.style.boxShadow = '0 4px 8px rgba(0,0,0,0.2)';
+                });
+                
+                newPageCard.addEventListener('mouseleave', () => {
+                    newPageCard.style.transform = 'scale(1)';
+                    newPageCard.style.boxShadow = 'none';
+                });
+                
+                newPageCard.addEventListener('click', () => {
+                    pageNumber = notebook.currentPage;
+                    pageInput.value = pageNumber.toString();
+                    // Highlight selected
+                    pageGrid.querySelectorAll('.page-card').forEach(card => {
+                        card.removeClass('selected');
+                    });
+                    newPageCard.addClass('selected');
+                    newPageCard.style.borderColor = 'var(--interactive-success)';
+                    newPageCard.style.background = 'var(--background-modifier-hover)';
+                });
+                
+                // Create cards for existing pages
+                for (const pageInfo of notebookPages) {
+                    const pageCard = pageGrid.createDiv({ cls: 'page-card' });
+                    pageCard.style.cssText = `
+                        border: 1px solid var(--background-modifier-border);
+                        border-radius: 8px;
+                        overflow: hidden;
+                        cursor: pointer;
+                        background: var(--background-primary);
+                        transition: all 0.2s ease;
+                        display: flex;
+                        flex-direction: column;
+                    `;
+                    
+                    // Image preview section
+                    const imagePreview = pageCard.createDiv({ cls: 'page-preview' });
+                    imagePreview.style.cssText = `
+                        height: 150px;
+                        background: var(--background-modifier-hover);
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        overflow: hidden;
+                        position: relative;
+                    `;
+                    
+                    if (pageInfo.image) {
+                        // Try to find and display the image
+                        const imagePath = this.app.vault.getFiles().find(f => f.name === pageInfo.image);
+                        if (imagePath) {
+                            const img = imagePreview.createEl('img');
+                            img.style.cssText = 'width: 100%; height: 100%; object-fit: cover;';
+                            img.src = this.app.vault.getResourcePath(imagePath);
+                        } else {
+                            imagePreview.createDiv({ text: '📄', cls: 'no-image' })
+                                .style.cssText = 'font-size: 48px; opacity: 0.3;';
+                        }
+                    } else {
+                        imagePreview.createDiv({ text: '📄', cls: 'no-image' })
+                            .style.cssText = 'font-size: 48px; opacity: 0.3;';
+                    }
+                    
+                    // Page info section
+                    const pageInfoDiv = pageCard.createDiv({ cls: 'page-info' });
+                    pageInfoDiv.style.cssText = 'padding: 10px;';
+                    
+                    const pageTitle = pageInfoDiv.createEl('div', { 
+                        text: `Page ${pageInfo.page}`,
+                        cls: 'page-title'
+                    });
+                    pageTitle.style.cssText = 'font-weight: bold; margin-bottom: 5px;';
+                    
+                    const fileName = pageInfoDiv.createEl('div', { 
+                        text: pageInfo.file.basename,
+                        cls: 'page-filename'
+                    });
+                    fileName.style.cssText = 'font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+                    
+                    const fileDate = pageInfoDiv.createEl('div', {
+                        text: window.moment(pageInfo.file.stat.mtime).format('MMM DD, YYYY'),
+                        cls: 'page-date'
+                    });
+                    fileDate.style.cssText = 'font-size: 10px; color: var(--text-faint); margin-top: 3px;';
+                    
+                    // Hover effect
+                    pageCard.addEventListener('mouseenter', () => {
+                        pageCard.style.transform = 'scale(1.02)';
+                        pageCard.style.boxShadow = '0 4px 8px rgba(0,0,0,0.2)';
+                    });
+                    
+                    pageCard.addEventListener('mouseleave', () => {
+                        pageCard.style.transform = 'scale(1)';
+                        pageCard.style.boxShadow = 'none';
+                    });
+                    
+                    // Click to view note
+                    pageCard.addEventListener('click', () => {
+                        // Open the note in a new tab
+                        this.app.workspace.getLeaf('tab').openFile(pageInfo.file);
+                    });
+                }
+            };
+            
+            // Function to load loose pages (no notebook)
+            const loadLoosePages = async () => {
+                pageGrid.empty();
+                newPageContainer.style.display = 'none';
+                
+                const allFiles = this.app.vault.getMarkdownFiles();
+                const loosePages: TFile[] = [];
+                
+                for (const file of allFiles) {
+                    const cache = this.app.metadataCache.getFileCache(file);
+                    if (!cache?.frontmatter?.notebook_id) {
+                        // Check if it has our custom tags to identify it as a scan
+                        const tags = cache?.frontmatter?.tags || [];
+                        if (tags.some((tag: string) => tag.includes('from-notebook') || tag.includes('sketchnote'))) {
+                            loosePages.push(file);
+                        }
+                    }
+                }
+                
+                // Sort by date
+                loosePages.sort((a, b) => (b.stat.mtime || 0) - (a.stat.mtime || 0));
+                
+                pageCount.setText(` - ${loosePages.length} loose pages found`);
+                
+                // Create cards for loose pages
+                for (const file of loosePages.slice(0, 20)) { // Limit to 20 most recent
+                    const cache = this.app.metadataCache.getFileCache(file);
+                    const imageName = cache?.frontmatter?.image;
+                    
+                    const pageCard = pageGrid.createDiv({ cls: 'page-card' });
+                    pageCard.style.cssText = `
+                        border: 1px solid var(--background-modifier-border);
+                        border-radius: 8px;
+                        overflow: hidden;
+                        cursor: pointer;
+                        background: var(--background-primary);
+                        transition: all 0.2s ease;
+                    `;
+                    
+                    const imagePreview = pageCard.createDiv({ cls: 'page-preview' });
+                    imagePreview.style.cssText = `
+                        height: 150px;
+                        background: var(--background-modifier-hover);
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                    `;
+                    
+                    if (imageName) {
+                        const imagePath = this.app.vault.getFiles().find(f => f.name === imageName);
+                        if (imagePath) {
+                            const img = imagePreview.createEl('img');
+                            img.style.cssText = 'width: 100%; height: 100%; object-fit: cover;';
+                            img.src = this.app.vault.getResourcePath(imagePath);
+                        }
+                    } else {
+                        imagePreview.createDiv({ text: '📄' }).style.cssText = 'font-size: 48px; opacity: 0.3;';
+                    }
+                    
+                    const pageInfoDiv = pageCard.createDiv({ cls: 'page-info' });
+                    pageInfoDiv.style.cssText = 'padding: 10px;';
+                    pageInfoDiv.createEl('div', { text: file.basename })
+                        .style.cssText = 'font-weight: bold; font-size: 12px; overflow: hidden; text-overflow: ellipsis;';
+                    pageInfoDiv.createEl('div', { text: window.moment(file.stat.mtime).format('MMM DD, YYYY HH:mm') })
+                        .style.cssText = 'font-size: 10px; color: var(--text-muted); margin-top: 5px;';
+                    
+                    pageCard.addEventListener('click', () => {
+                        this.app.workspace.getLeaf('tab').openFile(file);
+                    });
+                    
+                    pageCard.addEventListener('mouseenter', () => {
+                        pageCard.style.transform = 'scale(1.02)';
+                        pageCard.style.boxShadow = '0 4px 8px rgba(0,0,0,0.2)';
+                    });
+                    
+                    pageCard.addEventListener('mouseleave', () => {
+                        pageCard.style.transform = 'scale(1)';
+                        pageCard.style.boxShadow = 'none';
+                    });
+                }
+            };
+            
+            // Load initial content
+            if (this.settings.currentNotebookId) {
+                notebookSelect.value = this.settings.currentNotebookId;
+                loadNotebookPages(this.settings.currentNotebookId);
+            } else {
+                loadLoosePages();
+            }
+            
+            // Handle notebook selection change
+            notebookSelect.addEventListener('change', () => {
+                const notebookId = notebookSelect.value;
+                if (notebookId) {
+                    newPageContainer.style.display = 'flex';
+                    loadNotebookPages(notebookId);
+                } else {
+                    selectedNotebook = null;
+                    pageNumber = null;
+                    loadLoosePages();
                 }
             });
             
-            if (selectedNotebook) {
-                pageInput.value = selectedNotebook.currentPage.toString();
-                pageNumber = selectedNotebook.currentPage;
-            }
+            // Handle page number input
+            pageInput.addEventListener('input', () => {
+                const value = parseInt(pageInput.value);
+                if (!isNaN(value) && value > 0) {
+                    pageNumber = value;
+                }
+            });
             
-            const autoIncrementContainer = formContainer.createDiv({ cls: 'setting-item' });
-            autoIncrementContainer.style.display = selectedNotebook ? 'flex' : 'none';
+            // Auto-increment checkbox
+            const autoIncrementContainer = headerSection.createDiv({ cls: 'setting-item' });
+            autoIncrementContainer.style.cssText = 'margin-top: 10px;';
             const autoIncrementCheckbox = autoIncrementContainer.createEl('input', {
                 type: 'checkbox',
                 attr: { id: 'auto-increment-check' }
@@ -317,32 +1132,9 @@ export default class GeminiNoteProcessor extends Plugin {
             });
             autoIncrementLabel.style.marginLeft = '5px';
             
-            notebookSelect.addEventListener('change', () => {
-                const notebookId = notebookSelect.value;
-                if (notebookId) {
-                    selectedNotebook = this.settings.notebooks.find(n => n.id === notebookId) || null;
-                    if (selectedNotebook) {
-                        pageContainer.style.display = 'flex';
-                        autoIncrementContainer.style.display = 'flex';
-                        pageInput.value = selectedNotebook.currentPage.toString();
-                        pageNumber = selectedNotebook.currentPage;
-                    }
-                } else {
-                    selectedNotebook = null;
-                    pageNumber = null;
-                    pageContainer.style.display = 'none';
-                    autoIncrementContainer.style.display = 'none';
-                }
-            });
-            
-            pageInput.addEventListener('input', () => {
-                const value = parseInt(pageInput.value);
-                if (!isNaN(value) && value > 0) {
-                    pageNumber = value;
-                }
-            });
-            
+            // Button container at bottom
             const buttonContainer = formContainer.createDiv({ cls: 'modal-button-container' });
+            buttonContainer.style.cssText = 'padding: 15px; border-top: 1px solid var(--background-modifier-border); display: flex; justify-content: flex-end; gap: 10px;';
             
             const cancelButton = buttonContainer.createEl('button', { text: 'Cancel' });
             cancelButton.addEventListener('click', () => {
@@ -408,18 +1200,11 @@ export default class GeminiNoteProcessor extends Plugin {
 			const exifData: any = ExifReader(buffer);
 			console.log('EXIF data parsed successfully');
 			
-			// Log the entire EXIF structure to understand what we're working with
-			console.log('Full EXIF data structure:', JSON.stringify(exifData, null, 2));
-			
 			// Check different possible GPS data locations
 			if (exifData) {
-				// Log all top-level keys
-				console.log('Top-level EXIF keys:', Object.keys(exifData));
-				
 				// Check for GPS data in different possible locations
 				if (exifData.gps) {
 					console.log('Found gps object:', exifData.gps);
-					console.log('GPS object keys:', Object.keys(exifData.gps));
 					
 					// Check for different coordinate formats
 					if (exifData.gps.Latitude && exifData.gps.Longitude) {
@@ -432,98 +1217,10 @@ export default class GeminiNoteProcessor extends Plugin {
 							return country; 
 						}
 					}
-					
-					// Check for alternative GPS field names
-					if (exifData.gps.GPSLatitude && exifData.gps.GPSLongitude) {
-						console.log('Found GPSLatitude/GPSLongitude fields');
-						console.log('GPSLatitude:', exifData.gps.GPSLatitude);
-						console.log('GPSLongitude:', exifData.gps.GPSLongitude);
-						
-						// These might be in DMS format, need conversion
-						const lat = this.convertDMSToDD(
-							exifData.gps.GPSLatitude,
-							exifData.gps.GPSLatitudeRef
-						);
-						const lon = this.convertDMSToDD(
-							exifData.gps.GPSLongitude,
-							exifData.gps.GPSLongitudeRef
-						);
-						
-						if (lat && lon) {
-							console.log('Converted coordinates - Lat:', lat, 'Lon:', lon);
-							const country = await this.getCountryFromCoords(lat, lon);
-							if (country) {
-								new Notice(`Location from photo: ${country}`);
-								return country;
-							}
-						}
-					}
 				}
-				
-				// Check if GPS data is directly in exifData
-				if (exifData.GPSLatitude && exifData.GPSLongitude) {
-					console.log('GPS data found at root level');
-					console.log('GPSLatitude:', exifData.GPSLatitude);
-					console.log('GPSLongitude:', exifData.GPSLongitude);
-					
-					const lat = this.convertDMSToDD(
-						exifData.GPSLatitude,
-						exifData.GPSLatitudeRef
-					);
-					const lon = this.convertDMSToDD(
-						exifData.GPSLongitude,
-						exifData.GPSLongitudeRef
-					);
-					
-					if (lat && lon) {
-						console.log('Converted coordinates - Lat:', lat, 'Lon:', lon);
-						const country = await this.getCountryFromCoords(lat, lon);
-						if (country) {
-							new Notice(`Location from photo: ${country}`);
-							return country;
-						}
-					}
-				}
-				
-				// Check for already decimal coordinates
-				if (exifData.latitude && exifData.longitude) {
-					console.log('Found decimal coordinates at root');
-					console.log('Latitude:', exifData.latitude);
-					console.log('Longitude:', exifData.longitude);
-					
-					const country = await this.getCountryFromCoords(
-						exifData.latitude,
-						exifData.longitude
-					);
-					if (country) {
-						new Notice(`Location from photo: ${country}`);
-						return country;
-					}
-				}
-				
-				console.log('No recognizable GPS data format found in EXIF');
-			} else {
-				console.log('EXIF data is null or undefined');
 			}
 		} catch (error: any) { 
 			console.error('Error parsing EXIF data:', error);
-			console.error('Error stack:', error.stack);
-			
-			// Try alternative EXIF extraction approach
-			console.log('Attempting alternative EXIF extraction method...');
-			try {
-				const gpsData = this.extractGPSFromJPEG(imageData);
-				if (gpsData) {
-					console.log('Alternative method found GPS:', gpsData);
-					const country = await this.getCountryFromCoords(gpsData.latitude, gpsData.longitude);
-					if (country) {
-						new Notice(`Location from photo: ${country}`);
-						return country;
-					}
-				}
-			} catch (altError) {
-				console.error('Alternative EXIF extraction also failed:', altError);
-			}
 		}
 		
 		// Fallback to current location if enabled
@@ -537,106 +1234,10 @@ export default class GeminiNoteProcessor extends Plugin {
 					new Notice(`Using current location: ${country}`); 
 					return country; 
 				}
-			} else {
-				console.log('Could not get current location');
 			}
 		}
 		
 		console.log('=== Location extraction completed, no location found ===');
-		return null;
-	}
-	
-	// Helper function to convert DMS (Degrees, Minutes, Seconds) to DD (Decimal Degrees)
-	convertDMSToDD(dms: any, ref: string): number | null {
-		console.log('Converting DMS to DD:', dms, 'Ref:', ref);
-		
-		if (!dms || !Array.isArray(dms) || dms.length < 3) {
-			console.log('Invalid DMS format');
-			return null;
-		}
-		
-		try {
-			let dd = dms[0] + dms[1]/60 + dms[2]/3600;
-			
-			// Apply reference direction
-			if (ref === 'S' || ref === 'W') {
-				dd = -dd;
-			}
-			
-			console.log('Converted to decimal degrees:', dd);
-			return dd;
-		} catch (error) {
-			console.error('Error converting DMS to DD:', error);
-			return null;
-		}
-	}
-	
-	// Alternative GPS extraction method for JPEG files
-	extractGPSFromJPEG(imageData: ArrayBuffer): GPSCoordinates | null {
-		console.log('Attempting manual JPEG EXIF extraction...');
-		
-		try {
-			const dataView = new DataView(imageData);
-			
-			// Check for JPEG magic number
-			if (dataView.getUint16(0) !== 0xFFD8) {
-				console.log('Not a JPEG file');
-				return null;
-			}
-			
-			let offset = 2;
-			let marker;
-			
-			// Search for EXIF marker (0xFFE1)
-			while (offset < dataView.byteLength) {
-				marker = dataView.getUint16(offset);
-				
-				if (marker === 0xFFE1) {
-					console.log('Found EXIF marker at offset:', offset);
-					
-					// Get EXIF data length
-					const exifLength = dataView.getUint16(offset + 2);
-					console.log('EXIF segment length:', exifLength);
-					
-					// Check for "Exif\0\0" header
-					if (dataView.getUint32(offset + 4) === 0x45786966 && 
-						dataView.getUint16(offset + 8) === 0x0000) {
-						console.log('Valid EXIF header found');
-						
-						// Parse TIFF header (starts at offset + 10)
-						const tiffOffset = offset + 10;
-						const littleEndian = dataView.getUint16(tiffOffset) === 0x4949;
-						console.log('Byte order:', littleEndian ? 'Little Endian' : 'Big Endian');
-						
-						// This is where more complex TIFF/IFD parsing would go
-						// For now, we'll just log that we found valid EXIF
-						console.log('Found valid EXIF data, but full parsing not implemented');
-						
-						// You could implement full TIFF/IFD parsing here if needed
-						// This would involve reading IFD entries and finding GPS IFD
-					}
-					
-					break;
-				}
-				
-				// Move to next segment
-				if ((marker & 0xFF00) === 0xFF00 && marker !== 0xFF00) {
-					// Valid marker, get segment length and skip
-					const segmentLength = dataView.getUint16(offset + 2);
-					offset += 2 + segmentLength;
-				} else {
-					offset += 1;
-				}
-			}
-			
-			if (marker !== 0xFFE1) {
-				console.log('No EXIF data found in JPEG');
-			}
-			
-		} catch (error) {
-			console.error('Error in manual JPEG EXIF extraction:', error);
-		}
-		
 		return null;
 	}
 
@@ -668,7 +1269,20 @@ export default class GeminiNoteProcessor extends Plugin {
 			if (resultText && editor) {
 				const cursor = editor.getCursor();
 				const lineContent = editor.getLine(cursor.line);
-				editor.replaceRange(`\n\n---\n${resultText}\n---`, { line: cursor.line, ch: lineContent.length });
+				
+				// Build insert text with discussion link at the top
+				let insertText = '\n\n';
+				
+				// Add discussion link first if enabled
+				if (this.settings.enableDiscussionLinks && noteFile) {
+					const encodedPath = encodeURIComponent(noteFile.path);
+					insertText += `[${this.settings.discussionLinkText}](obsidian://gemini-discuss?file=${encodedPath})\n\n`;
+				}
+				
+				// Then add the main content
+				insertText += `---\n${resultText}\n---`;
+				
+				editor.replaceRange(insertText, { line: cursor.line, ch: lineContent.length });
 				new Notice("Note processed successfully!");
 			}
 		} catch (error) {
@@ -782,21 +1396,7 @@ export default class GeminiNoteProcessor extends Plugin {
                         <p>Use "Gallery" mode to take photos with your camera app, then select them.</p>
                         <div style="margin-top: 20px;">
                             <button class="mod-cta" id="switch-to-gallery">Switch to Gallery Mode</button>
-                        </div>
-                        <details style="margin-top: 20px; text-align: left;">
-                            <summary style="cursor: pointer; font-weight: bold;">Advanced: Try to Fix Camera Access</summary>
-                            <ol style="margin-top: 10px;">
-                                <li>Go to Android <strong>Settings → Apps → Obsidian</strong></li>
-                                <li>Check if "Camera" permission exists</li>
-                                <li>If it doesn't exist, camera access is not available</li>
-                                <li>If it exists but is disabled, enable it and restart Obsidian</li>
-                            </ol>
-                        </details>
-                    `;
-                } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-                    errorMessage += `<p>No camera was detected on your device.</p>`;
-                } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-                    errorMessage += `<p>The camera is already in use by another application. Please close it and try again.</p>`;
+                        </div>`;
                 } else {
                     errorMessage += `<p>Camera error: ${err.message || err.name}</p>
                         <p>Try using Gallery mode instead.</p>`;
@@ -906,15 +1506,28 @@ export default class GeminiNoteProcessor extends Plugin {
     }
 
     async createNoteFromImageCapture() {
-        if (!this.settings.geminiApiKey) { new Notice("Gemini API key is not set."); return; }
+        if (!this.settings.geminiApiKey) { 
+            new Notice("Gemini API key is not set."); 
+            return; 
+        }
 
         const { notebook: selectedNotebook, pageNumber, cancelled } = await this.showNotebookSelectionModal();
-        if (cancelled) { return; }
+        if (cancelled) { 
+            return; 
+        }
 
-        const isAndroid = /Android/i.test(navigator.userAgent);
+        // Detect platform
+        const userAgent = navigator.userAgent;
+        const isIOS = /iPhone|iPad|iPod/i.test(userAgent);
+        const isAndroid = /Android/i.test(userAgent);
+        
+        // Log for debugging
+        console.log('Platform detection - iOS:', isIOS, 'Android:', isAndroid, 'UserAgent:', userAgent);
+        
         let imageData: ArrayBuffer | null = null;
         let sourceFileName = 'captured-image.jpg';
 
+        // Only Android gets special camera handling
         if (isAndroid && this.settings.androidCameraMode !== 'gallery') {
             // Try camera first on Android
             imageData = await this.captureFromAndroidCamera();
@@ -925,32 +1538,43 @@ export default class GeminiNoteProcessor extends Plugin {
             }
         }
 
-        // Fall back to file picker if camera didn't work or if gallery mode is selected
+        // For iOS (iPhone AND iPad) or Android fallback, use file picker
         if (!imageData) {
             const file = await new Promise<File | null>((resolve) => {
                 const input = document.createElement('input');
                 input.type = 'file';
                 input.accept = 'image/*';
                 
-                // On iOS, still try to use camera capture
-                if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+                // For ALL iOS devices (iPhone, iPad, iPod), use camera capture
+                // This ensures iPad behaves exactly like iPhone
+                if (isIOS) {
                     input.capture = 'environment';
+                    console.log('iOS device detected - camera capture enabled');
                 }
                 // On Android with camera mode, try to trigger camera through file picker
                 else if (isAndroid && this.settings.androidCameraMode === 'camera') {
                     input.capture = 'environment';
+                    console.log('Android camera mode - capture enabled');
                 }
                 
                 input.style.display = 'none';
                 document.body.appendChild(input);
+                
                 input.onchange = () => {
-                    resolve(input.files ? input.files[0] : null);
+                    const selectedFile = input.files ? input.files[0] : null;
+                    if (selectedFile) {
+                        console.log('File selected:', selectedFile.name, 'Size:', selectedFile.size);
+                    }
                     document.body.removeChild(input);
+                    resolve(selectedFile);
                 };
-				input.addEventListener('cancel', () => {
-					document.body.removeChild(input);
-					resolve(null);
-				});
+                
+                input.addEventListener('cancel', () => {
+                    console.log('File selection cancelled');
+                    document.body.removeChild(input);
+                    resolve(null);
+                });
+                
                 input.click();
             });
 
@@ -965,6 +1589,7 @@ export default class GeminiNoteProcessor extends Plugin {
             return;
         }
 
+        console.log('Processing image:', sourceFileName, 'Size:', imageData.byteLength);
         await this.processCapturedImage(imageData, sourceFileName, selectedNotebook, pageNumber);
     }
 
@@ -1008,14 +1633,28 @@ export default class GeminiNoteProcessor extends Plugin {
                 noteFileName = `Note ${timestamp}.md`;
             }
             
-            const noteFilePath = `${noteFolder}/${noteFileName}`;
+            const noteFilePath = noteFolder ? `${noteFolder}/${noteFileName}` : noteFileName;
             
-            let noteContent = `![[${imageFile.path}]]\n`;
+            // Build note content with discussion link at the top
+            let noteContent = '';
+            
+            // Add discussion link at the very top (it will appear right after properties)
+            if (this.settings.enableDiscussionLinks) {
+                const encodedPath = encodeURIComponent(noteFilePath);
+                noteContent += `[${this.settings.discussionLinkText}](obsidian://gemini-discuss?file=${encodedPath})\n\n`;
+            }
+            
+            // Add image
+            noteContent += `![[${imageFile.path}]]\n`;
+            
+            // Add notebook info if applicable
             if (selectedNotebook && pageNumber) {
                 noteContent += `\n> **Notebook:** ${selectedNotebook.name} | **Page:** ${pageNumber}\n`;
             } else if (!selectedNotebook) {
                 noteContent += `\n> **Source:** Loose paper / No notebook\n`;
             }
+            
+            // Add the main content
             noteContent += `\n---\n${resultText}\n---`;
             
             const newNoteFile = await this.app.vault.create(noteFilePath, noteContent);
@@ -1217,7 +1856,7 @@ export default class GeminiNoteProcessor extends Plugin {
             // Remove bullet points if present
             taskText = taskText.replace(/^[-*•]\s*/, '');
             
-            // Check for priority indicators (!, !!, !!!, HIGH, MEDIUM, LOW)
+            // Check for priority indicators (!, !!, !!!!, HIGH, MEDIUM, LOW)
             if (taskText.match(/^!!!|^HIGH:/i)) {
                 priority = '⏫'; // Highest priority
                 taskText = taskText.replace(/^(!!!|HIGH:)/i, '').trim();
@@ -1350,90 +1989,6 @@ export default class GeminiNoteProcessor extends Plugin {
             if (unit === 'year') return today.clone().add(1, 'year').format('YYYY-MM-DD');
         }
         
-        // Handle "this" patterns
-        const thisMatch = normalizedDate.match(/^this\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend)$/);
-        if (thisMatch) {
-            const day = thisMatch[1];
-            if (day === 'weekend') {
-                const saturday = today.clone().day(6);
-                return saturday.format('YYYY-MM-DD');
-            }
-            const targetDay = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].indexOf(day);
-            const thisDay = today.clone().day(targetDay);
-            return thisDay.format('YYYY-MM-DD');
-        }
-        
-        // Handle "in X days/weeks/months"
-        const inMatch = normalizedDate.match(/^in\s+(\d+)\s+(days?|weeks?|months?)$/);
-        if (inMatch) {
-            const amount = parseInt(inMatch[1]);
-            const unit = inMatch[2].replace(/s$/, '');
-            return today.clone().add(amount, unit as any).format('YYYY-MM-DD');
-        }
-        
-        // Handle "X days/weeks from now"
-        const fromNowMatch = normalizedDate.match(/^(\d+)\s+(days?|weeks?|months?)\s+from\s+(now|today)$/);
-        if (fromNowMatch) {
-            const amount = parseInt(fromNowMatch[1]);
-            const unit = fromNowMatch[2].replace(/s$/, '');
-            return today.clone().add(amount, unit as any).format('YYYY-MM-DD');
-        }
-        
-        // Handle specific date patterns like "1st November 2025"
-        const ordinalDateMatch = normalizedDate.match(/(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?/);
-        if (ordinalDateMatch) {
-            const day = parseInt(ordinalDateMatch[1]);
-            const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
-            const monthIndex = monthNames.indexOf(ordinalDateMatch[2]);
-            const year = ordinalDateMatch[3] ? parseInt(ordinalDateMatch[3]) : today.year();
-            
-            const targetDate = today.clone().year(year).month(monthIndex).date(day);
-            // If no year specified and date is in the past, assume next year
-            if (!ordinalDateMatch[3] && targetDate.isBefore(today, 'day')) {
-                targetDate.add(1, 'year');
-            }
-            return targetDate.format('YYYY-MM-DD');
-        }
-        
-        // Handle month day patterns (e.g., "June 15", "June 15th")
-        const monthDayMatch = normalizedDate.match(/(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?/);
-        if (monthDayMatch) {
-            const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
-            const month = monthDayMatch[1];
-            const day = parseInt(monthDayMatch[2]);
-            const year = monthDayMatch[3] ? parseInt(monthDayMatch[3]) : today.year();
-            const monthIndex = monthNames.indexOf(month);
-            const targetDate = today.clone().year(year).month(monthIndex).date(day);
-            // If no year specified and date is in the past, assume next year
-            if (!monthDayMatch[3] && targetDate.isBefore(today, 'day')) {
-                targetDate.add(1, 'year');
-            }
-            return targetDate.format('YYYY-MM-DD');
-        }
-        
-        // Handle end of time periods
-        if (normalizedDate === 'end of week' || normalizedDate === 'eow') {
-            return today.clone().endOf('week').format('YYYY-MM-DD');
-        }
-        if (normalizedDate === 'end of month' || normalizedDate === 'eom') {
-            return today.clone().endOf('month').format('YYYY-MM-DD');
-        }
-        if (normalizedDate === 'end of year' || normalizedDate === 'eoy') {
-            return today.clone().endOf('year').format('YYYY-MM-DD');
-        }
-        
-        // Handle day names (assume this week or next week)
-        const dayMatch = normalizedDate.match(/^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/);
-        if (dayMatch) {
-            const targetDay = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].indexOf(dayMatch[1]);
-            let targetDate = today.clone().day(targetDay);
-            // If the day has passed this week, move to next week
-            if (targetDate.isBefore(today, 'day')) {
-                targetDate.add(1, 'week');
-            }
-            return targetDate.format('YYYY-MM-DD');
-        }
-        
         // Try parsing with moment directly for standard formats
         const parsed = window.moment(dateString, ['YYYY-MM-DD', 'MM/DD/YYYY', 'DD/MM/YYYY', 'MMM DD, YYYY', 'MMMM DD, YYYY'], true);
         if (parsed.isValid()) {
@@ -1445,15 +2000,23 @@ export default class GeminiNoteProcessor extends Plugin {
 
     async getAndEnsureFolder(pathTemplate: string): Promise<string> {
         let folderPath = pathTemplate.trim();
-        if (!folderPath) { return ""; }
+        if (!folderPath || folderPath === "/") { return ""; }
         
         if (!pathTemplate.includes("{notebook}")) {
-            folderPath = folderPath.replace(/YYYY/g, window.moment().format("YYYY")).replace(/MM/g, window.moment().format("MM")).replace(/DD/g, window.moment().format("DD"));
+            folderPath = folderPath.replace(/YYYY/g, window.moment().format("YYYY"))
+                .replace(/MM/g, window.moment().format("MM"))
+                .replace(/DD/g, window.moment().format("DD"));
         }
+        
+        // Remove any trailing slashes
+        folderPath = folderPath.replace(/\/+$/, '');
+        // Remove any duplicate slashes
+        folderPath = folderPath.replace(/\/+/g, '/');
 
         if (!(await this.app.vault.adapter.exists(folderPath))) {
-            try { await this.app.vault.createFolder(folderPath); } 
-            catch (error) {
+            try { 
+                await this.app.vault.createFolder(folderPath); 
+            } catch (error) {
                 new Notice(`Error creating folder: ${folderPath}.`);
                 console.error("Error creating folder:", error);
                 return ""; 
@@ -1589,16 +2152,6 @@ export default class GeminiNoteProcessor extends Plugin {
                     }
                 }
                 
-                // Also check for common date phrases in the task text itself  
-                const byMatch = taskText.match(/\bby\s+(tonight|tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next\s+\w+|\d{1,2}(?:st|nd|rd|th)?\s+\w+(?:\s+\d{4})?|[\w\s]+?)(?=\s*$|[,.])/i);
-                if (byMatch && !dates['due']) {
-                    const parsedDate = this.parseNaturalDate(byMatch[1]);
-                    if (parsedDate) {
-                        dates['due'] = parsedDate;
-                        taskText = taskText.replace(byMatch[0], '').trim();
-                    }
-                }
-                
                 // Build the formatted task with Obsidian Tasks syntax
                 let formattedTask = `- [ ] ${priority}${taskText}`;
                 
@@ -1647,19 +2200,6 @@ export default class GeminiNoteProcessor extends Plugin {
                     console.log('Found Tasks section, processing...');
                     const processedTasks = this.processExtractedTasks(tasksMatch[1]);
                     responseText = responseText.replace(tasksMatch[0], `### Tasks\n${processedTasks}`);
-                } else {
-                    // Check if we have the old format (TODOs) and convert it
-                    const todosRegex = /### TODOs?\s*\n([\s\S]*?)(?=\n###|$)/;
-                    const todosMatch = responseText.match(todosRegex);
-                    if (todosMatch && todosMatch[1]) {
-                        console.log('Found old TODOs section, converting to Tasks...');
-                        const processedTasks = this.processExtractedTasks(todosMatch[1]);
-                        responseText = responseText.replace(todosMatch[0], `### Tasks\n${processedTasks}`);
-                        
-                        // Also remove "Next Actions" section if present
-                        const nextActionsRegex = /### Next Actions\s*\n[\s\S]*?(?=\n###|$)/;
-                        responseText = responseText.replace(nextActionsRegex, '');
-                    }
                 }
                 
                 return responseText;
@@ -1743,6 +2283,7 @@ export default class GeminiNoteProcessor extends Plugin {
 	}
 }
 
+// Settings Tab Class
 class GeminiSettingTab extends PluginSettingTab {
 	plugin: GeminiNoteProcessor;
 	constructor(app: App, plugin: GeminiNoteProcessor) {
@@ -1825,16 +2366,6 @@ class GeminiSettingTab extends PluginSettingTab {
 				return text;
 			});
 		
-		// Test button to verify settings work
-		new Setting(containerEl)
-			.setName('Test Prompt Settings')
-			.setDesc('Click to test if prompt settings are working')
-			.addButton(button => button
-				.setButtonText('Test')
-				.onClick(() => {
-					new Notice(`Prompt length: ${this.plugin.settings.geminiPrompt?.length || 0} characters`);
-				}));
-		
 		// Reset button in its own setting
 		new Setting(containerEl)
 			.setName('Reset Prompt')
@@ -1843,33 +2374,7 @@ class GeminiSettingTab extends PluginSettingTab {
 				.setButtonText('Reset to Default')
 				.onClick(async () => {
 					// Use the full default prompt inline
-					this.plugin.settings.geminiPrompt = `You are an expert note-processing assistant integrated into Obsidian. I am providing you with an image of a handwritten note. 
-Perform the following tasks and format your response *exactly* as specified below, using Markdown. 
-Do not include any other text, headers, or pleasantries in your response.
-
-IMPORTANT: When transcribing, preserve formatting indicators:
-- If a word appears underlined in the handwriting, format it as <u>word</u>
-- Maintain numbered or bulleted lists exactly as they appear
-- Keep the exact structure and organization of the original note
-
-### Transcript
-[Provide a full, verbatim transcript of the text in the image here, preserving all formatting indicators as specified above.]
-
-### Summary
-[Provide a concise bullet-point summary of the key points.]
-
-### Tasks
-[Extract any actionable tasks or to-do items from the note. Format each as a checkbox item using "- [ ]" followed by the task description. 
-Include any time indicators mentioned with the task:
-- If a due date is mentioned (e.g., "by Friday", "due tomorrow", "by tonight", "before June 1"), include it as "DUE: [date]"
-- If a scheduled/planned date is mentioned (e.g., "scheduled for Monday", "on the 15th"), include it as "SCHEDULED: [date]"
-- If a start date is mentioned (e.g., "start next week", "begin in January"), include it as "START: [date]"
-- If priority is indicated (!, !!, !!!), include it at the beginning
-Example format: "- [ ] !!! Task description DUE: tomorrow SCHEDULED: Monday"
-If no tasks are found, write "None identified."]
-
-### Detected Tags
-[Identify any hashtags (e.g., #idea, #meeting) in the text. List them here as a comma-separated list, without the '#' symbol. For example: idea, meeting, project-alpha. If none are found, write "None identified."]`;
+					this.plugin.settings.geminiPrompt = DEFAULT_GEMINI_PROMPT;
 					await this.plugin.saveSettings();
 					this.display();
 				}));
@@ -1953,6 +2458,37 @@ If no tasks are found, write "None identified."]
 			.addToggle(toggle => toggle.setValue(this.plugin.settings.fallbackToCurrentLocation)
 				.onChange(async (value) => { this.plugin.settings.fallbackToCurrentLocation = value; await this.plugin.saveSettings(); }));
 		
+		// Discussion Settings
+		containerEl.createEl('h2', { text: 'Discussion Settings' });
+		new Setting(containerEl)
+			.setName('Enable Discussion Links')
+			.setDesc('Add a link to discuss the note with Gemini at the top of processed notes')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableDiscussionLinks)
+				.onChange(async (value) => { 
+					this.plugin.settings.enableDiscussionLinks = value; 
+					await this.plugin.saveSettings(); 
+					this.display();
+				}));
+		
+		if (this.plugin.settings.enableDiscussionLinks) {
+			new Setting(containerEl)
+				.setName('Discussion Link Text')
+				.setDesc('Customize the text for the discussion link')
+				.addText(text => text
+					.setPlaceholder('💬 Discuss this note with Gemini')
+					.setValue(this.plugin.settings.discussionLinkText)
+					.onChange(async (value) => { 
+						this.plugin.settings.discussionLinkText = value || '💬 Discuss this note with Gemini'; 
+						await this.plugin.saveSettings(); 
+					}));
+			
+			containerEl.createEl('p', { 
+				text: '💡 You can also use the command palette (Ctrl/Cmd+P) to open Gemini Chat for any note.',
+				cls: 'setting-item-description' 
+			});
+		}
+		
 		containerEl.createEl('h2', { text: 'Trigger Words' });
 		new Setting(containerEl)
 			.setName('Enable Trigger Words').setDesc('Process underlined keywords as special triggers for additional Gemini actions')
@@ -1970,7 +2506,7 @@ If no tasks are found, write "None identified."]
 			
 			containerEl.createEl('h3', { text: 'Trigger Words Configuration' });
 			containerEl.createEl('p', { 
-				text: 'Enable/disable specific trigger words. Underline words in your handwritten notes to activate these AI-powered actions - Gemini will detect and process them automatically.', 
+				text: 'Enable/disable specific trigger words. Underline words in your handwritten notes to activate these AI-powered actions.', 
 				cls: 'setting-item-description' 
 			});
 			
@@ -2062,7 +2598,7 @@ If no tasks are found, write "None identified."]
 					}));
 			
 			containerEl.createEl('p', { 
-				text: '💡 How to use: Underline "Tasks" in your handwritten notes, then list tasks below. Use ! for priority (!!! = highest, !! = high, ! = medium).',
+				text: '💡 How to use: Underline "Tasks" in your handwritten notes, then list tasks below.',
 				cls: 'setting-item-description' 
 			});
 		}
@@ -2080,27 +2616,27 @@ If no tasks are found, write "None identified."]
 					await this.plugin.saveSettings(); 
 				}));
 		containerEl.createEl('p', { 
-			text: '💡 Tip: If camera access fails on Android, use Gallery mode. You can take a photo with your camera app first, then select it.',
+			text: '💡 Tip: If camera access fails on Android, use Gallery mode.',
 			cls: 'setting-item-description' 
 		});
 	}
 	
 	getTriggerUsageDescription(keyword: string, action: string): string {
 		const descriptions: Record<string, string> = {
-			'Research': "Deep research on topics you list below the underlined word. Write 'Research' and underline it, then list items below.",
-			'Expand': "Expands brief notes into detailed, well-structured content. Underline 'Expand' followed by your brief notes or concept.",
-			'Summarize': "Creates concise summaries of your content. Underline 'Summarize' or 'Summarise' above the text to summarize.",
-			'Actions': "Extracts and prioritizes all action items with suggested deadlines. Underline 'Actions' above your notes to process.",
-			'Tasks': "Adds tasks to your Obsidian Tasks note with priority and tags support. Underline 'Tasks' then list items below (use ! for priority).",
-			'Analyze': "Provides critical analysis including pros, cons, risks and opportunities. Underline 'Analyze' or 'Analyse' above content to analyze.",
-			'Define': "Provides clear definitions with examples for terms listed below. Underline 'Define' then list terms underneath.",
-			'Translate': "Translates content to your specified language. Write and underline 'Translate to [Language]' above the text to translate.",
-			'Rewrite': "Rewrites content in a different style (formal, casual, email, etc.). Underline 'Rewrite' and specify the style, then provide content.",
-			'Questions': "Generates thought-provoking questions to encourage deeper thinking. Underline 'Questions' above your topic or content.",
-			'Connect': "Identifies connections to related concepts and interdisciplinary links. Underline 'Connect' above the concept to explore.",
-			'Organize': "Organizes content into clear, logical structure with categories and priorities. Underline 'Organize' or 'Organise' above content to structure.",
-			'TagLinks': "Finds and links to other notes with matching tags. Underline 'TagLinks' anywhere in your note to generate a related notes section.",
-			'Related': "Same as TagLinks - finds notes with matching tags. Underline 'Related' to discover connected notes in your vault."
+			'Research': "Deep research on topics you list below the underlined word.",
+			'Expand': "Expands brief notes into detailed, well-structured content.",
+			'Summarize': "Creates concise summaries of your content.",
+			'Actions': "Extracts and prioritizes all action items with suggested deadlines.",
+			'Tasks': "Adds tasks to your Obsidian Tasks note with priority and tags support.",
+			'Analyze': "Provides critical analysis including pros, cons, risks and opportunities.",
+			'Define': "Provides clear definitions with examples for terms listed below.",
+			'Translate': "Translates content to your specified language.",
+			'Rewrite': "Rewrites content in a different style (formal, casual, email, etc.).",
+			'Questions': "Generates thought-provoking questions to encourage deeper thinking.",
+			'Connect': "Identifies connections to related concepts and interdisciplinary links.",
+			'Organize': "Organizes content into clear, logical structure with categories.",
+			'TagLinks': "Finds and links to other notes with matching tags.",
+			'Related': "Same as TagLinks - finds notes with matching tags."
 		};
 		
 		// Handle spelling variants
@@ -2109,16 +2645,5 @@ If no tasks are found, write "None identified."]
 		if (keyword === 'Organise') return descriptions['Organize'];
 		
 		return descriptions[keyword] || 'Process content';
-	}
-	
-	getTriggerDescription(action: string): string {
-		const descriptions: Record<string, string> = {
-			'research': 'Deep research on listed topics', 'expand': 'Expand brief notes into detailed content', 'summarize': 'Create concise summaries',
-			'actions': 'Extract and prioritize action items', 'tasks': 'Add tasks to Obsidian Tasks note', 'analyze': 'Critical analysis with pros/cons', 'define': 'Clear definitions with examples',
-			'translate': 'Translate to specified language', 'rewrite': 'Rewrite in different style', 'questions': 'Generate thought-provoking questions',
-			'connect': 'Find related concepts and connections', 'organize': 'Organize content into logical structure',
-			'taglinks': 'Find notes with matching tags', 'related': 'Find related notes by tags'
-		};
-		return descriptions[action] || 'Process content';
 	}
 }
