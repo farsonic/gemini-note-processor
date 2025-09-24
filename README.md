@@ -18,7 +18,7 @@ Process handwritten notes in Obsidian using Google Gemini AI vision capabilities
 ## Installation
 
 1. Get a Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
-2. Install the plugin from Obsidian Community Plugins (coming soon)
+2. Install the plugin from Obsidian Community Plugins (coming soon) or using BRAT
 3. Enter your API key in settings
 4. Start capturing notes!
 
