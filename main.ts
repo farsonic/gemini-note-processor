@@ -136,7 +136,7 @@ interface GeminiNoteProcessorSettings {
 
 const DEFAULT_SETTINGS: GeminiNoteProcessorSettings = {
     geminiApiKey: '',
-    selectedModel: 'gemini-1.5-flash-latest',
+    selectedModel: 'gemini-2.5-flash-latest',
     customTags: 'sketchnote, from-notebook',
     enableDeepResearch: false,
     newNoteLocation: 'Gemini Scans/YYYY',
