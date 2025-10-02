@@ -136,7 +136,7 @@ interface GeminiNoteProcessorSettings {
 
 const DEFAULT_SETTINGS: GeminiNoteProcessorSettings = {
     geminiApiKey: '',
-    selectedModel: 'gemini-2.5-flash',
+    selectedModel: 'gemini-2.5-flash-preview-05-20',
     customTags: 'sketchnote, from-notebook',
     enableDeepResearch: false,
     newNoteLocation: 'Gemini Scans/YYYY',
@@ -978,6 +978,15 @@ export default class GeminiNoteProcessor extends Plugin {
             }
         };
 
+        // Self-healing for old model name. If the saved model is a non-versioned flash model,
+        // update it to a specific version that is known to work with the REST API.
+        if (this.settings.selectedModel === 'gemini-2.5-flash') {
+            console.log("Gemini Note Processor: Found outdated model name, updating to 'gemini-2.5-flash-preview-05-20'.");
+            this.settings.selectedModel = 'gemini-2.5-flash-preview-05-20';
+            await this.saveSettings();
+        }
+
+
         // Ensure all required settings exist
         if (!this.settings.triggerActions) {
             this.settings.triggerActions = DEFAULT_TRIGGER_ACTIONS;
@@ -1017,6 +1026,44 @@ export default class GeminiNoteProcessor extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+    }
+
+    // New method to test the API key
+    async testApiKey() {
+        if (!this.settings.geminiApiKey) {
+            new Notice("Please enter your Gemini API key first.");
+            return;
+        }
+
+        const apiKey = this.settings.geminiApiKey;
+        const model = this.settings.selectedModel;
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+        const testPrompt = "Write a short, one-sentence confirmation that the API is working.";
+        const requestBody = { "contents": [{ "parts": [{ "text": testPrompt }] }] };
+
+        const testNotice = new Notice("Testing Gemini API connection...", 0); // Indefinite notice
+
+        try {
+            const response = await requestUrl({
+                url: API_URL,
+                method: 'POST',
+                contentType: 'application/json',
+                body: JSON.stringify(requestBody)
+            });
+
+            if (response.json.candidates?.[0]?.content?.parts?.[0]?.text) {
+                testNotice.hide(); // Hide the "testing" notice
+                new Notice("✅ Gemini API connection successful!", 5000);
+            } else {
+                throw new Error("Invalid response structure from API.");
+            }
+        } catch (error: any) {
+            testNotice.hide();
+            console.error("Gemini API test failed:", error);
+            const errorMessage = error.headers ? `HTTP ${error.status}: ${error.message || 'Error'}` : error.message;
+            new Notice(`❌ Gemini API connection failed: ${errorMessage}`, 10000); // Longer notice for errors
+        }
     }
 
     // Enhanced method for processing existing images
@@ -1259,7 +1306,7 @@ export default class GeminiNoteProcessor extends Plugin {
         folderSelect.style.cssText = 'width: 100%; margin-bottom: 20px;';
 
         folderSelect.createEl('option', { value: '', text: '-- Select a folder --' });
-        folders.forEach((folder: string) => {  // FIXED: Added type annotation
+        folders.forEach((folder: string) => { // FIXED: Added type annotation
             folderSelect.createEl('option', { value: folder, text: folder || '/' });
         });
 
@@ -2147,7 +2194,7 @@ ${response}
                             </div>`;
                     } else {
                         errorMessage += `<p>Camera error: ${err.message || err.name}</p>
-                                <p>Try using Gallery mode instead.</p>`;
+                                    <p>Try using Gallery mode instead.</p>`;
                     }
                     errorDiv.innerHTML = errorMessage;
 
@@ -3264,6 +3311,32 @@ class GeminiSettingTab extends PluginSettingTab {
                     this.plugin.settings.geminiApiKey = value;
                     await this.plugin.saveSettings();
                 }));
+        
+        // ADDED: Test Connection Button
+        new Setting(containerEl)
+            .addButton(button => button
+                .setButtonText("Test Connection")
+                .setTooltip("Tests if your API key and selected model are working")
+                .onClick(() => {
+                    this.plugin.testApiKey();
+                }));
+
+        // UPDATED: Model Selection Dropdown
+        new Setting(containerEl)
+            .setName('Gemini Model')
+            .setDesc('Select the Gemini model to use for processing.')
+            .addDropdown(dropdown => {
+                dropdown
+                    .addOption('gemini-2.5-flash-preview-05-20', 'Gemini 2.5 Flash (Recommended)')
+                    .addOption('gemini-2.5-pro', 'Gemini 2.5 Pro (Advanced)')
+                    .addOption('gemini-2.0-flash-001', 'Gemini 2.0 Flash')
+                    .setValue(this.plugin.settings.selectedModel)
+                    .onChange(async (value) => {
+                        this.plugin.settings.selectedModel = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
+
 
         // PROMPT CONFIGURATION SECTION - SIMPLIFIED
         containerEl.createEl('h2', { text: 'Prompt Configuration' });
@@ -3721,7 +3794,7 @@ class GeminiSettingTab extends PluginSettingTab {
                 'Not yet run';
 
             statusContainer.createEl('p', {
-                text: `Status: ${this.plugin.folderMonitor?.isRunning() ? '🟢 Running' : '🔴 Stopped'}`,  // FIXED
+                text: `Status: ${this.plugin.folderMonitor?.isRunning() ? '🟢 Running' : '🔴 Stopped'}`, // FIXED
                 cls: 'setting-item-description'
             });
 
@@ -3799,3 +3872,4 @@ class GeminiSettingTab extends PluginSettingTab {
         return descriptions[keyword] || 'Process content';
     }
 }
+
