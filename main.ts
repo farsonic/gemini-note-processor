@@ -157,7 +157,7 @@ const DEFAULT_SETTINGS: GeminiNoteProcessorSettings = {
     tasksNotePath: 'Tasks/Inbox.md',
     tasksSectionHeading: '## Captured Tasks',
     taskPriorities: true,
-    defaultTaskTags: '#captured',
+    defaultTaskTags: '#task',
     geminiPrompt: DEFAULT_GEMINI_PROMPT,
     enableDiscussionLinks: true,
     discussionLinkText: '💬 Discuss this note with Gemini',
